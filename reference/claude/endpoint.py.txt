@@ -1,0 +1,597 @@
+"""
+The local Claude Code endpoint contract, and the seal Courier puts on a run.
+
+Validated against Claude Code **2.1.246** on 2026-08-28. Every claim below was
+observed by running the binary, not read from documentation. See
+`docs/COURIER_ENDPOINT_CONTRACT.md` for the raw envelopes.
+
+What was observed, and why it changed the design
+------------------------------------------------
+COURIER-ATLAS-001 architectural law 3 says `terminal_reason` determines the
+outcome and process `exit_code` is telemetry only -- `PERMISSION_DENIED` with
+`exit_code: 0` is a failure. That is right, and on 2.1.246 it is not sufficient.
+
+Four probes were run. In the sharpest one, the endpoint was asked to create a
+file while `--permission-mode plan` was in force. The write was **genuinely
+prevented** -- the file did not exist afterwards. The result envelope said:
+
+    exit code          0
+    is_error           false
+    subtype            "success"
+    terminal_reason    "completed"
+    permission_denials []
+
+and the model's prose reported, accurately, that it had been unable to do the
+work. In two further probes the tool was withheld and the model's prose claimed
+the command *had* run, while `terminal_reason` still read `completed`.
+
+So on this version:
+
+1. `exit_code` is telemetry. As law 3 says.
+2. `terminal_reason` describes how the **conversation** ended, not whether the
+   **work** happened. `completed` means the turn finished, and it is returned
+   for blocked runs too.
+3. `permission_denials` was empty in every denial-shaped probe, including the
+   one where a permission genuinely stopped the action. Its presence is
+   evidence; **its absence proves nothing.**
+4. The prose in `result` is the model's own narration and has already been
+   observed to claim work that did not occur. It is never a seal.
+
+The consequence: nothing the endpoint returns on its own is a success signal.
+A run is only sealed `COMPLETED` when the operator emits a **structured
+receipt** under `--json-schema`, which 2.1.246 returns validated in a
+`structured_output` field. A run that ends `completed` with no receipt is sealed
+`UNKNOWN`, never success -- law 2, silence is not success.
+
+Where the seal stops
+--------------------
+The seal classifies **the run**. It does not decide whether the mission
+advanced. `Seal.outcome == COMPLETED` means "the operator returned a
+well-formed receipt claiming it completed the work", and the receipt is carried
+at `unverified` provenance because a model's account of its own work is a
+proposed proof, not an observed result. The facts Courier witnessed itself --
+exit code, duration, terminal reason, denials -- are carried separately at
+`system_record`. Keeping the two apart in the data structure is what stops the
+claim from being read as the observation later on.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+from dataclasses import asdict, dataclass, field
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
+
+from ..core import provenance
+from .permission_policy import (BoundedPermission, child_environment, enforce)
+from .telemetry import UNKNOWN, ResourceTelemetry, from_envelope
+
+# ------------------------------------------------------------ the contract
+
+CONTRACT_NAME = "claude-code-local"
+
+# Versions whose result envelope has actually been exercised.
+# Not a minimum, and not a range: a version outside this set has not been
+# observed, and evidence is not carried across versions silently.
+#
+# Each entry is one observation with its own date, because "validated" is a
+# claim about a specific binary and a single global date cannot carry it. A
+# version may only be added by running that binary and reading its envelope --
+# seeing the version *banner* is not exercising the contract, which is why
+# 2.1.250 was observed on this machine and is deliberately absent below.
+CONTRACT_OBSERVATIONS = {
+    "2.1.246": "2026-08-28",
+    "2.1.251": "2026-08-28",
+}
+
+VALIDATED_CLI_VERSIONS = frozenset(CONTRACT_OBSERVATIONS)
+
+#: The most recent observation date, kept for callers that reported one date.
+CONTRACT_VALIDATED_ON = max(CONTRACT_OBSERVATIONS.values())
+
+# Version churn, recorded because it changes how this pin should be read.
+# This binary reported 2.1.250 at 17:05Z and 2.1.251 at 20:0xZ on the same
+# day: the CLI self-updates, so a pin naming one version goes stale in hours,
+# and a Courier dispatch would then be refused for a version skew rather than
+# for anything about the contract. Failing closed is still right -- an
+# unobserved envelope is unobserved -- but "add the current version" is a
+# treadmill, not a fix. Whether to validate the contract *surface* (the flags
+# and envelope fields below) instead of the version string is a design
+# decision recorded for the Lead in docs/COURIER_ENDPOINT_CONTRACT.md, not one
+# taken here.
+
+
+class EndpointError(RuntimeError):
+    """The endpoint could not be used as contracted."""
+
+
+class UnvalidatedContract(EndpointError):
+    """The binary about to run is not the one the contract was proved against."""
+
+
+# The version banner on 2.1.246 reads `2.1.246 (Claude Code)`. Both halves are
+# checked: the number says *which* contract applies, and the marker says this
+# is a Claude Code endpoint at all.
+VERSION_PATTERN = re.compile(r"(\d+\.\d+\.\d+(?:[.\-][0-9A-Za-z.]+)?)")
+CLAUDE_MARKER = "claude code"
+
+# How long the version probe may take. It is one local process printing a
+# string; anything slower is a broken binary, not a slow one.
+VERSION_PROBE_TIMEOUT = 30.0
+
+# A probe takes the resolved executable path and returns what running
+# `<path> --version` produced. Injected so the suite never spawns a provider.
+VersionProber = Callable[[str], "RunResult"]
+
+
+@dataclass(frozen=True)
+class EndpointIdentity:
+    """Which binary is about to run, and what it says it is.
+
+    Produced by observing the executable, never by trusting a caller. R1
+    finding 3: `LocalClaudeCodeEndpoint` previously accepted a caller-supplied
+    executable *and* a caller-supplied version string, and checked the second
+    against a constant. A wrong binary paired with `cli_version="2.1.246"`
+    passed the gate. The version is now read from the same resolved path that
+    dispatch will invoke, and dispatch invokes that absolute path rather than
+    re-resolving a bare name through `PATH` a second time.
+    """
+
+    realpath: str
+    version: str
+    banner: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"realpath": self.realpath, "version": self.version,
+                "banner": self.banner,
+                "evidence_state": "system_record"}
+
+
+# The receipt the operator must return. Small on purpose: Courier needs to know
+# what the operator claims happened, not to receive a report.
+RECEIPT_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "outcome": {"type": "string",
+                    "enum": ["completed", "refused", "failed"]},
+        "detail": {"type": "string"},
+        "artifacts": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["outcome", "detail"],
+}
+
+RECEIPT_OUTCOMES = ("completed", "refused", "failed")
+
+# ---------------------------------------------------------------- outcomes
+
+COMPLETED = "COMPLETED"
+REFUSED = "REFUSED"
+FAILED = "FAILED"
+UNKNOWN_OUTCOME = "UNKNOWN"
+
+SEAL_OUTCOMES = (COMPLETED, REFUSED, FAILED, UNKNOWN_OUTCOME)
+
+# `completed` is the only terminal_reason observed on 2.1.246, and it was
+# returned for successful, blocked and hallucinated runs alike. It therefore
+# means "the turn ended normally" and nothing more.
+OBSERVED_TERMINAL_REASONS = frozenset({"completed"})
+
+# Terminal reasons this contract has *not* observed but treats as failure if
+# they appear. This is inference, not observation, and is labelled as such in
+# the seal's reason string. Anything outside both sets seals UNKNOWN rather
+# than being guessed at.
+INFERRED_FAILURE_TERMINAL_REASONS = frozenset({
+    "error", "error_max_turns", "max_turns", "budget_exceeded",
+    "max_budget_exceeded", "interrupted", "canceled", "cancelled",
+    "refusal", "permission_denied", "timeout",
+})
+
+PERMISSION_DENIED = "PERMISSION_DENIED"
+
+
+@dataclass(frozen=True)
+class Receipt:
+    """The operator's own claim about what it did. Never an observation."""
+
+    outcome: str
+    detail: str
+    artifacts: Sequence[str] = field(default_factory=tuple)
+    evidence_state: str = provenance.DEFAULT_EVIDENCE_STATE
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["artifacts"] = list(self.artifacts)
+        data["evidence_label"] = provenance.evidence_state_label(self.evidence_state)
+        return data
+
+
+def parse_receipt(envelope: Optional[Dict[str, Any]]) -> Optional[Receipt]:
+    """Pull the structured receipt out of an envelope, or None.
+
+    None is returned for a missing, malformed, or out-of-vocabulary receipt.
+    All three mean the same thing to the seal -- the operator did not state an
+    outcome -- and none of them may be smoothed into a default.
+    """
+    if not isinstance(envelope, dict):
+        return None
+    raw = envelope.get("structured_output")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+    if not isinstance(raw, dict):
+        return None
+    outcome = raw.get("outcome")
+    if outcome not in RECEIPT_OUTCOMES:
+        return None
+    detail = raw.get("detail")
+    artifacts = raw.get("artifacts") or ()
+    if not isinstance(artifacts, (list, tuple)):
+        artifacts = ()
+    return Receipt(
+        outcome=outcome,
+        detail=detail if isinstance(detail, str) else "",
+        artifacts=tuple(str(item) for item in artifacts),
+        evidence_state=provenance.assert_not_verified(
+            provenance.DEFAULT_EVIDENCE_STATE,
+            "An operator's report of its own work"),
+    )
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """The raw facts of one process run, before any judgement is applied."""
+
+    exit_code: int
+    stdout: str
+    stderr: str = ""
+    timed_out: bool = False
+
+    def envelope(self) -> Optional[Dict[str, Any]]:
+        """The parsed JSON result, or None if stdout was not one."""
+        text = (self.stdout or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+
+@dataclass(frozen=True)
+class Seal:
+    """Courier's classification of a run -- explicitly not a mission verdict.
+
+    `decides_mission_truth` is a constant `False` and is asserted by
+    `tests/test_courier.py`. It is here so that anyone reaching for this object
+    to complete a work package finds the answer written on the object itself.
+    """
+
+    outcome: str
+    reason: str
+    terminal_reason: Optional[str]
+    exit_code: Optional[int]
+    permission_denials: Sequence[Any] = field(default_factory=tuple)
+    receipt: Optional[Receipt] = None
+    telemetry: ResourceTelemetry = field(default_factory=ResourceTelemetry)
+    session_ref: Optional[str] = None
+    contract_version: Optional[str] = None
+
+    # Facts Courier watched happen carry its own record state; the operator's
+    # account of its work does not.
+    observation_evidence_state: str = "system_record"
+    claim_evidence_state: str = provenance.DEFAULT_EVIDENCE_STATE
+
+    decides_mission_truth: bool = False
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome == COMPLETED
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "reason": self.reason,
+            "observed": {
+                "terminal_reason": self.terminal_reason,
+                "exit_code": self.exit_code,
+                "permission_denials": list(self.permission_denials),
+                "session_ref": self.session_ref,
+                "contract_version": self.contract_version,
+                "evidence_state": self.observation_evidence_state,
+            },
+            "claimed": self.receipt.to_dict() if self.receipt else None,
+            "telemetry": self.telemetry.to_dict(),
+            "decides_mission_truth": self.decides_mission_truth,
+        }
+
+
+def seal(result: RunResult,
+         declared_billing_mode: str = UNKNOWN) -> Seal:
+    """Classify a run. `exit_code` is recorded and never consulted.
+
+    The order below is the argument. Denials outrank a `completed` terminal
+    reason, a missing receipt outranks a clean envelope, and the process's own
+    exit status never enters the decision at any point.
+    """
+    envelope = result.envelope()
+    telemetry = from_envelope(envelope, declared_billing_mode)
+    terminal_reason = envelope.get("terminal_reason") if envelope else None
+    session_ref = envelope.get("session_id") if envelope else None
+    denials = envelope.get("permission_denials") if envelope else None
+    denials = tuple(denials) if isinstance(denials, (list, tuple)) else ()
+    receipt = parse_receipt(envelope)
+
+    def build(outcome: str, reason: str) -> Seal:
+        return Seal(outcome=outcome, reason=reason,
+                    terminal_reason=terminal_reason, exit_code=result.exit_code,
+                    permission_denials=denials, receipt=receipt,
+                    telemetry=telemetry, session_ref=session_ref,
+                    contract_version=(envelope or {}).get("version"))
+
+    if result.timed_out:
+        return build(UNKNOWN_OUTCOME,
+                     "The run exceeded its timeout and was stopped. What the "
+                     "operator had done by then was not observed, so the "
+                     "outcome is unknown rather than failed.")
+
+    if envelope is None:
+        return build(UNKNOWN_OUTCOME,
+                     "No JSON result envelope was returned, so nothing about "
+                     "this run was observed. Unknown, not failed -- the work "
+                     "may well have happened.")
+
+    # 1. A recorded denial is decisive, whatever the exit code or the terminal
+    #    reason says. This is law 3.
+    if denials:
+        return build(REFUSED,
+                     f"The endpoint recorded {len(denials)} permission "
+                     f"denial(s). A denial seals the run refused even though "
+                     f"the process exited {result.exit_code} and reported "
+                     f"terminal_reason={terminal_reason!r}.")
+
+    # 2. An explicit error flag.
+    if envelope.get("is_error") is True or envelope.get("api_error_status"):
+        return build(FAILED,
+                     f"The endpoint reported an error "
+                     f"(is_error={envelope.get('is_error')!r}, "
+                     f"api_error_status={envelope.get('api_error_status')!r}).")
+
+    # 3. A terminal reason that is neither observed nor inferable.
+    if terminal_reason in INFERRED_FAILURE_TERMINAL_REASONS:
+        return build(FAILED,
+                     f"terminal_reason={terminal_reason!r} indicates the turn "
+                     f"did not finish normally. (This mapping is inferred: "
+                     f"only 'completed' was observed on "
+                     f"{sorted(VALIDATED_CLI_VERSIONS)[0]}.)")
+    if terminal_reason not in OBSERVED_TERMINAL_REASONS:
+        return build(UNKNOWN_OUTCOME,
+                     f"terminal_reason={terminal_reason!r} is not a value this "
+                     f"contract has observed or mapped. Guessing what an "
+                     f"unrecognised terminal state means is how a courier "
+                     f"starts inventing outcomes.")
+
+    # 4. `completed` alone is not success. The receipt decides.
+    if receipt is None:
+        return build(UNKNOWN_OUTCOME,
+                     "The turn ended normally but the operator returned no "
+                     "structured receipt, so it never stated what it did. On "
+                     "2.1.246 a fully blocked action also ends with "
+                     "terminal_reason='completed' and no permission denials, "
+                     "so a missing receipt cannot be read as success.")
+    if receipt.outcome == "refused":
+        return build(REFUSED, f"The operator reported it refused: {receipt.detail}")
+    if receipt.outcome == "failed":
+        return build(FAILED, f"The operator reported it failed: {receipt.detail}")
+
+    return build(COMPLETED,
+                 "The turn ended normally, no permission was denied, and the "
+                 "operator returned a receipt claiming it completed the work. "
+                 "That claim is carried unverified: Courier observed the run, "
+                 "not the work.")
+
+
+@dataclass(frozen=True)
+class LocalClaudeCodeEndpoint:
+    """One addressable local Claude Code operator.
+
+    Holds no credentials. Authentication is the provider's own, exactly as it
+    is for a human at the same terminal.
+    """
+
+    working_directory: str
+    permission: BoundedPermission
+    executable: str = "claude"
+    model: Optional[str] = None
+    timeout_seconds: float = 900.0
+    persist_session: bool = False
+    declared_billing_mode: str = UNKNOWN
+    cli_version: Optional[str] = None
+
+    def address(self) -> str:
+        return f"{CONTRACT_NAME}://{self.working_directory}"
+
+    # ------------------------------------------------------------ identity
+
+    def resolve_executable(self) -> str:
+        """The absolute real path of the binary this endpoint would run.
+
+        Resolved once and then used verbatim, so the name is not looked up
+        through `PATH` a second time between the version check and the run.
+        """
+        candidate = (self.executable or "").strip()
+        if not candidate:
+            raise UnvalidatedContract("This endpoint names no executable.")
+        found = (candidate if os.path.sep in candidate
+                 else shutil.which(candidate))
+        if not found:
+            raise UnvalidatedContract(
+                f"'{candidate}' was not found on PATH, so there is no binary "
+                f"whose identity could be checked.")
+        realpath = os.path.realpath(found)
+        if not os.path.isfile(realpath):
+            raise UnvalidatedContract(
+                f"'{candidate}' resolves to {realpath}, which is not a file.")
+        if not os.access(realpath, os.X_OK):
+            raise UnvalidatedContract(
+                f"{realpath} is not executable.")
+        return realpath
+
+    def assert_validated(self,
+                         prober: Optional[VersionProber] = None
+                         ) -> EndpointIdentity:
+        """Prove the binary about to run is a Claude Code the contract covers.
+
+        The Lead's standing instruction on DOM-21 is that a contract finding
+        recorded against one version is historical reconnaissance against
+        another, and must not be carried silently. Independent review then
+        found that checking a caller-supplied *string* proved nothing about the
+        executable. So the version is now **observed** from the resolved path:
+
+        1. resolve the executable to an absolute real path;
+        2. run `<that exact path> --version` under the same contained
+           environment a dispatch would use;
+        3. require the banner to identify Claude Code -- this is a Claude
+           endpoint, not a generic process executor;
+        4. require the parsed version to be one the contract was proved
+           against;
+        5. if the caller also declared a version, require it to agree, so a
+           stale declaration is a refusal rather than a silent correction.
+
+        Raises `UnvalidatedContract` before any ledger row is opened.
+        """
+        realpath = self.resolve_executable()
+        probe = (prober or default_version_prober)(realpath)
+        banner = " ".join((probe.stdout or "").split()) or \
+            " ".join((probe.stderr or "").split())
+        if probe.timed_out or not banner:
+            raise UnvalidatedContract(
+                f"{realpath} produced no version banner, so its identity is "
+                f"unknown. An unidentifiable binary is not dispatched to.")
+        if CLAUDE_MARKER not in banner.lower():
+            raise UnvalidatedContract(
+                f"{realpath} reported {banner!r}, which does not identify "
+                f"Claude Code. This endpoint carries the Claude Code result "
+                f"contract specifically; it is not a configurable executor for "
+                f"whatever binary happens to sit at that path.")
+        match = VERSION_PATTERN.search(banner)
+        if not match:
+            raise UnvalidatedContract(
+                f"No version number could be read from {banner!r}.")
+        observed = match.group(1)
+        if observed not in VALIDATED_CLI_VERSIONS:
+            raise UnvalidatedContract(
+                f"{realpath} is Claude Code {observed}, which this contract was "
+                f"not proved against ({', '.join(sorted(VALIDATED_CLI_VERSIONS))}, "
+                f"validated {CONTRACT_VALIDATED_ON}). Re-run the endpoint "
+                f"probes, record what changed, and widen the set deliberately. "
+                f"Evidence is not carried across versions silently.")
+        declared = (self.cli_version or "").strip()
+        if declared and declared != observed:
+            raise UnvalidatedContract(
+                f"This endpoint declares Claude Code {declared}, but "
+                f"{realpath} reports {observed}. A declaration that disagrees "
+                f"with the binary is a refusal, not something to correct "
+                f"quietly -- whichever of the two is stale, the record would "
+                f"otherwise name the wrong contract.")
+        return EndpointIdentity(realpath=realpath, version=observed,
+                                banner=banner)
+
+    # ------------------------------------------------------------- commands
+
+    def child_environment(self,
+                          parent_env: Optional[Mapping[str, str]] = None
+                          ) -> Dict[str, str]:
+        """The contained environment this endpoint's child runs under."""
+        return child_environment(parent_env)
+
+    def build_argv(self, prompt: str, extra: Sequence[str] = (),
+                   executable: Optional[str] = None) -> List[str]:
+        """The exact command, enforced before it is handed back.
+
+        `enforce()` runs on the assembled list, so Courier's own flags are
+        checked alongside the caller's. `executable` carries the resolved real
+        path from `assert_validated()`; dispatch passes it so the binary that
+        was identified is the binary that runs.
+        """
+        if not (prompt or "").strip():
+            raise EndpointError(
+                "A dispatch must carry an instruction. An empty prompt would "
+                "start a session that could report 'completed' having been "
+                "asked to do nothing.")
+        argv: List[str] = [
+            executable or self.executable,
+            "-p", prompt,
+            "--output-format", "json",
+            "--json-schema", json.dumps(RECEIPT_SCHEMA, sort_keys=True,
+                                        separators=(",", ":")),
+        ]
+        if not self.persist_session:
+            argv.append("--no-session-persistence")
+        if self.model:
+            argv.extend(["--model", self.model])
+        argv.extend(self.permission.to_argv())
+        argv.extend(str(token) for token in (extra or ()))
+        enforce(argv)
+        return argv
+
+    def redacted_command_line(self, prompt: str, extra: Sequence[str] = (),
+                              executable: Optional[str] = None) -> str:
+        """The command with the instruction removed, for the durable record.
+
+        R1 finding 4: the ledger was persisting the whole `-p <prompt>`, which
+        copies mission text -- potentially sensitive, and not Courier's to keep
+        -- into append-only storage that nothing prunes. What an audit actually
+        needs is which command shape ran under which permission, and enough to
+        tie it to the instruction that was carried. A digest does that; the
+        text itself does not add to it.
+
+        There is no unredacted counterpart on purpose. A method that returned
+        the full command would eventually be the one somebody logged.
+        """
+        argv = self.build_argv(prompt, extra, executable)
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        placeholder = f"<prompt sha256:{digest[:12]} chars:{len(prompt)}>"
+        redacted = [placeholder if token == prompt else token
+                    for token in argv]
+        return " ".join(shlex.quote(token) for token in redacted)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"contract": CONTRACT_NAME, "address": self.address(),
+                "working_directory": self.working_directory,
+                "executable": self.executable, "model": self.model,
+                "cli_version": self.cli_version,
+                "timeout_seconds": self.timeout_seconds,
+                "persist_session": self.persist_session,
+                "declared_billing_mode": self.declared_billing_mode,
+                "permission": self.permission.to_dict()}
+
+
+def default_version_prober(executable_path: str) -> "RunResult":
+    """Ask a resolved binary what it is, under the contained environment.
+
+    Runs the same absolute path dispatch will run, with the same allowlisted
+    environment, so the answer is about the binary that will actually execute
+    rather than about whatever `PATH` resolves to next time.
+    """
+    try:
+        completed = subprocess.run(
+            [executable_path, "--version"], capture_output=True, text=True,
+            timeout=VERSION_PROBE_TIMEOUT, check=False,
+            env=child_environment())
+    except subprocess.TimeoutExpired:
+        return RunResult(exit_code=-1, stdout="", stderr="", timed_out=True)
+    except OSError as failure:
+        raise UnvalidatedContract(
+            f"{executable_path} could not be run to read its version: "
+            f"{failure!r}")
+    return RunResult(exit_code=completed.returncode,
+                     stdout=completed.stdout or "",
+                     stderr=completed.stderr or "")

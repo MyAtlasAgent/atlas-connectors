@@ -1,0 +1,430 @@
+#!/bin/zsh
+# grok-mission — Grok (SuperGrok subscription) reviewer adapter.
+#
+# Analogous to droid-mission and agy-mission. Same signature as droid-mission:
+#   grok-mission <packet-path> <return-path> <worktree>
+#
+# WHY THE ISOLATED HOME (verified 2026-09-01, not inferred)
+# --------------------------------------------------------
+# `grok inspect` in a mission worktree reported, verbatim:
+#     MCP Servers (1)
+#     └ linear-server (http)  ~/.claude.json [claude]
+# Grok Build discovers Claude Code configuration: `~/.claude.json` MCP servers,
+# `~/.claude/agents`, `~/.claude/Claude.md`, and `.claude/settings.json` as a
+# permissions fallback when no TOML permissions exist (ours has none). A reviewer
+# that inherits linear-server holds save_issue/save_comment/save_status_update —
+# it could move its own mission to RETURNED. A reviewer that can write the
+# coordination surface is a second writer, not a reviewer.
+#
+# Running with an empty HOME and GROK_HOME pointed back at the real config dir
+# drops the inheritance while keeping the subscription login. Verified:
+#   MCP Servers (0); Agents (3, builtins only); project Claude.md/Agents.md still
+#   loaded (correct — project rules SHOULD govern); `grok models` still reports
+#   "logged in with grok.com".
+#
+# SUBSCRIPTION ONLY. XAI_API_KEY is refused, not merely unset: the standing rule
+# is subscription auth with no API fallback, and silently stripping a key the
+# operator deliberately exported would hide a routing decision.
+set -uo pipefail
+# --- DOM-1283 launch registration (R-171-B2-NARROW) ---------------------------
+# Registers THIS invocation in the Grok launch registry before anything else
+# runs, so every spelling of this file (hard link, relative or space-containing
+# path, copy of these bytes) is known to the publication hold. fd 9 carries the
+# shared launch lock for this process and every descendant that inherits it.
+# The wrapper must lead its own process group, so that the group outlives it as
+# a second handle on its descendants: a wrapper started inside its caller's
+# group (registrar exit 41) re-executes itself, same pid, through `lead`, which
+# makes it a group leader first. A launch that cannot be recorded does not run:
+# it exits 40 before reading or writing anything. The hook never creates the
+# lock: only `grok_launch_registry.py init` does, sealed and 0600. Python runs
+# isolated and without `site` (-I -S): PYTHONPATH and other PYTHON* variables,
+# the script directory and site-packages (a sitecustomize, a .pth file) cannot
+# run code ahead of the registrar.
+GROK_LAUNCH_PY=<LOCAL_HOME>/.local/bin/python3.11
+GROK_LAUNCH_REGISTRAR=<LOCAL_HOME>/atlas-ops/bin/grok_launch_registry.py
+GROK_LAUNCH_LOCK=<LOCAL_HOME>/atlas-ops/state/grok-launch.lock
+GROK_LAUNCH_RC=40
+if [[ -f "$GROK_LAUNCH_LOCK" ]] && { exec 9>>"$GROK_LAUNCH_LOCK" } 2>/dev/null; then
+  "$GROK_LAUNCH_PY" -I -S "$GROK_LAUNCH_REGISTRAR" register --lock-fd 9 --pid $$ \
+      --wrapper "$0" --launch-path <LOCAL_HOME>/atlas-ops/bin/grok-mission
+  GROK_LAUNCH_RC=$?
+  if (( GROK_LAUNCH_RC == 41 )); then
+    exec "$GROK_LAUNCH_PY" -I -S "$GROK_LAUNCH_REGISTRAR" lead --pid $$ -- /bin/zsh "$0" "$@"
+    GROK_LAUNCH_RC=40
+  fi
+fi
+if (( GROK_LAUNCH_RC != 0 )); then
+  echo "grok-mission: REFUSED — launch registration failed (DOM-1283); nothing was read or run."
+  exit 40
+fi
+# --- end DOM-1283 launch registration -----------------------------------------
+
+PACKET="${1:?usage: grok-mission <packet> <return> <worktree>}"
+RET="${2:?usage: grok-mission <packet> <return> <worktree>}"
+WT="${3:?usage: grok-mission <packet> <return> <worktree>}"
+
+GROK=<LOCAL_HOME>/.local/bin/grok
+REAL_GROK_HOME=<LOCAL_HOME>/.grok
+ISOLATED_HOME=<LOCAL_HOME>/atlas-ops/operator-state/grok/home
+
+# Returns are append-only evidence by attempt (DOM-94): archive any prior return
+# before this attempt can overwrite it. Grok run 1 on PR #63 was lost exactly this way.
+if [[ -f "$RET" ]]; then mkdir -p "$(dirname "$RET")/archive"; mv "$RET" "$(dirname "$RET")/archive/$(basename "$RET" .md)-$(date -u +%Y%m%dT%H%M%SZ).md"; fi
+LOGDIR=<LOCAL_HOME>/atlas-ops/operator-state/grok/logs
+MODEL="${GROK_MISSION_MODEL:-grok-4.6}"
+NUDGES=3
+
+IDENT="$(basename "$RET" .md)"
+# If the packet names a PR, the return's PR identity is checked against it.
+EXPECT_PR="${GROK_MISSION_PR:-$(grep -oE 'PR #[0-9]+' "$PACKET" 2>/dev/null | head -1 | grep -oE '[0-9]+')}"
+mkdir -p "$ISOLATED_HOME" "$LOGDIR"
+
+# --- subscription-only gate -------------------------------------------------
+if [[ -n "${XAI_API_KEY:-}" ]]; then
+  echo "grok-mission: REFUSED — XAI_API_KEY is set in this environment."
+  echo "grok-mission: this lane is subscription-authenticated by standing rule;"
+  echo "grok-mission: the xAI API is a separate credit-backed surface. Unset it."
+  exit 8
+fi
+[[ -x "$GROK" ]] || { echo "grok-mission: $GROK not executable"; exit 9; }
+[[ -f "$PACKET" ]] || { echo "grok-mission: packet not found: $PACKET"; exit 9; }
+[[ -d "$WT" ]]     || { echo "grok-mission: worktree not found: $WT"; exit 9; }
+
+# --- review permission envelope --------------------------------------------
+# Deny beats allow in Grok's rule engine, and rules gate execution while leaving
+# the tool present — so the agent can SEE that it was refused and report it,
+# rather than silently lacking a capability. Verified: `git push --dry-run` is
+# refused by the first rule below even under --permission-mode dontAsk.
+#
+# NOT --always-approve. NOT bypassPermissions. A reviewer reads, searches and
+# tests; it does not publish, merge, mutate the checkout, or read credentials.
+typeset -a PERMS
+PERMS=(
+  # publishing and history.
+  #
+  # The glob must survive INTERVENING FLAGS. `Bash(git push*)` does not match
+  # `git -C /path push --dry-run` — verified 2026-09-01 by canary C4, which the
+  # narrow form failed. Nothing dangerous ran, but only because the command was
+  # also unmatched by the allow list and was therefore cancelled: the deny rule
+  # was not what stopped it. That is protection by accident, and it is exactly
+  # why the allow list must not be widened while the deny list has holes — a
+  # blanket allow plus this rule would have EXECUTED the push.
+  # 2026-09-02, DOM-134 (two FAILED_NO_RETURN on a REVIEW-READY candidate):
+  # `Bash(git*merge*)` also matched `git merge-base --is-ancestor`, the one
+  # read-only command every reconciliation review must run — and under dontAsk a
+  # DENIED run_terminal_command does NOT come back as legible text: Grok's event
+  # log records permission_resolved decision=cancelled and ends the turn with
+  # cancellation_category=permission_cancelled, sibling calls included. So a
+  # deny that over-matches is as fatal as an allow-list hole. The merge deny is
+  # Canary 2026-09-02 (session 01a0636d): a deny DOES come back legibly
+  # ("Denied by permission policy: deny rule on bash matching \"git merge\"")
+  # and the turn continues — but the engine prefix-matches the rule text, so
+  # `Bash(git merge *)` still caught `git merge-base`. No glob shape separates
+  # `git merge X` from `git merge-base` here. The merge deny is therefore
+  # REMOVED and replaced by a semantic guard below: after the run, the worktree
+  # HEAD must still equal OBSERVED_SHA and the tree must be clean, or the return
+  # is rejected as produced against a mutated checkout. A merge that cannot be
+  # pushed (push stays denied) and voids the review is not worth a rule that
+  # blinds every reconciliation check.
+  # DOM-142 (2026-09-02 22:18Z): `Bash(git*commit*)` DENIED the reviewer's very
+  # first command — `git rev-parse --verify <sha>^{commit}` — because a rule
+  # with no spaces is a whole-string glob and "commit" appears inside the
+  # revision syntax. Same class: `git*tag*` matches any path containing "stage",
+  # `git*reset*` matches "preset". Every mutating-subcommand deny is now written
+  # in the spaced form (`git <sub> *` for the plain call, `git * <sub> *` for
+  # `git -C <path> <sub>`), which cannot match a revision suffix or a path.
+  --deny "Bash(git push*)"      --deny "Bash(git * push *)"
+  --deny "Bash(git rebase*)"    --deny "Bash(git * rebase *)"
+  --deny "Bash(git commit*)"    --deny "Bash(git * commit *)"
+  --deny "Bash(git reset*)"     --deny "Bash(git * reset *)"
+  --deny "Bash(git clean*)"     --deny "Bash(git * clean *)"
+  --deny "Bash(git tag*)"       --deny "Bash(git * tag *)"
+  --deny "Bash(git branch -D*)" --deny "Bash(git branch -d*)"  --deny "Bash(git * branch -D*)"
+  --deny "Bash(git worktree*)"  --deny "Bash(git * worktree *)"
+  --deny "Bash(git checkout*)"  --deny "Bash(git * checkout *)" --deny "Bash(git switch*)"
+  --deny "Bash(git restore*)"   --deny "Bash(git stash*)"      --deny "Bash(git am*)"
+  --deny "Bash(git apply*)"     --deny "Bash(git cherry-pick*)" --deny "Bash(git revert*)"
+  --deny "Bash(gh*merge*)"      --deny "Bash(gh*review*)"    --deny "Bash(gh*close*)"
+  --deny "Bash(gh*release*)"    --deny "Bash(gh api*)"
+  # destructive
+  --deny "Bash(rm*)"            --deny "Bash(sudo*)"         --deny "Bash(chmod*)"
+  --deny "Bash(mv*)"            --deny "Bash(dd*)"           --deny "Bash(truncate*)"
+  # credentials
+  --deny "Bash(security*)"      --deny "Bash(env)"           --deny "Bash(printenv*)"
+  --deny "Read(**/.env*)"       --deny "Read(**/auth.json)"  --deny "Read(**/keys.json)"
+  --deny "Read(**/.netrc)"      --deny "Read(**/id_*)"       --deny "Read(**/*.pem)"
+  --deny "Read(**/.claude.json)"
+  # the checkout under review is read-only; the return file is not in it
+  --deny "Edit(${WT}/**)"       --deny "Write(${WT}/**)"
+  # reading, searching and testing are what a reviewer is for
+  --allow "Bash(git status*)"   --allow "Bash(git log*)"     --allow "Bash(git diff*)"
+  --allow "Bash(git show*)"     --allow "Bash(git rev-parse*)" --allow "Bash(git ls-files*)"
+  --allow "Bash(gh pr view*)"   --allow "Bash(gh pr diff*)"
+  # Glob syntax, NOT Claude Code's `cmd:*` form. Grok treats the colon as a
+  # literal character, so `Bash(python3.11:*)` matched nothing and every probe
+  # the reviewer tried was cancelled under dontAsk — DOM-85's first successful
+  # review carried CONFIDENCE 72 with "runtime probes not executed" for exactly
+  # this reason. A reviewer that cannot run the suite is a reader, not a tester.
+  --allow "Bash(python3.11*)"   --allow "Bash(python3*)"
+  --allow "Bash(pytest*)"       --allow "Bash(ATLAS_DISABLE_LOCAL_MODEL=1*)"
+  # `cd` is not a convenience here. Under --permission-mode dontAsk an
+  # UNMATCHED tool call does not produce a refusal the model can report: it
+  # CANCELS THE WHOLE SESSION, silently, mid-turn. Verified 2026-09-01 —
+  # `cd <wt> && python3.11 -c "print(6*7)"` returned stopReason=cancelled after
+  # 1 turn, while the same command without the `cd` prefix returned 42. Agents
+  # routinely prefix with `cd`, so the gap cost DOM-85 its entire test run
+  # twice and capped both reviews at CONFIDENCE 0.72 "code-derived, not
+  # runtime-reproduced".
+  #
+  # THE SECURITY BOUNDARY HERE IS THE DENY LIST, NOT THIS ONE. Deny beats
+  # allow, and a denied call returns legible text the reviewer reports (proven
+  # with `git push --dry-run`). An allow-list hole is not a refusal; it is a
+  # dead session. So this list must cover every legitimate shape, and the deny
+  # list above is what actually bounds the reviewer.
+  --allow "Bash(cd*)"           --allow "Bash(export*)"
+  --allow "Bash(ls*)"           --allow "Bash(cat*)"         --allow "Bash(grep*)"
+  --allow "Bash(rg*)"           --allow "Bash(head*)"        --allow "Bash(tail*)"
+  --allow "Bash(sed*)"          --allow "Bash(wc*)"          --allow "Bash(find*)"
+  --allow "Bash(diff*)"         --allow "Bash(pwd)"
+  # 2026-09-02, DOM-134: a reconciliation review asked for `comm -23 <(git diff
+  # --name-only ...) <(...)` — `comm` was unmatched, so all four turns ended
+  # stopReason=cancelled with no return, and the lane recorded FAILED_NO_RETURN
+  # on a candidate that was REVIEW-READY. Every read-only text tool a reviewer
+  # reaches for to compare two lists must be here, plus the read-only git/gh
+  # shapes a reconciliation check needs (merge-base, cat-file, branch
+  # --contains, run/checks listing). `gh api` stays denied; `git branch -D`,
+  # push, merge, commit, reset stay denied — deny beats allow.
+  --allow "Bash(comm*)"         --allow "Bash(sort*)"        --allow "Bash(uniq*)"
+  --allow "Bash(awk*)"          --allow "Bash(cut*)"         --allow "Bash(tr*)"
+  --allow "Bash(echo*)"         --allow "Bash(printf*)"      --allow "Bash(xargs*)"
+  --allow "Bash(test*)"         --allow "Bash([*)"           --allow "Bash(true)"
+  --allow "Bash(git merge-base*)" --allow "Bash(git cat-file*)" --allow "Bash(git branch --contains*)"
+  --allow "Bash(git branch -r*)"  --allow "Bash(git fetch*)"  --allow "Bash(git name-rev*)"
+  --allow "Bash(git ls-tree*)"  --allow "Bash(git rev-list*)" --allow "Bash(git for-each-ref*)"
+  --allow "Bash(git describe*)" --allow "Bash(git blame*)"   --allow "Bash(git shortlog*)"
+  --allow "Bash(git show-ref*)" --allow "Bash(git ls-remote*)" --allow "Bash(git check-ignore*)"
+  --allow "Bash(gh run*)"       --allow "Bash(gh pr checks*)" --allow "Bash(gh pr list*)"
+  --allow "Bash(jq*)"           --allow "Bash(shasum*)"      --allow "Bash(md5*)"
+  --allow "Bash(date*)"         --allow "Bash(seq*)"         --allow "Bash(basename*)"
+  --allow "Bash(dirname*)"      --allow "Bash(realpath*)"    --allow "Bash(which*)"
+  --allow "Bash(nl*)"           --allow "Bash(paste*)"       --allow "Bash(column*)"
+  --allow "Bash(file*)"         --allow "Bash(stat*)"        --allow "Bash(du*)"
+)
+
+CONTRACT="
+
+[DISPATCH CONTRACT — REVIEWER LANE] You are reviewing, not building. The checkout
+at ${WT} is READ-ONLY to you: commits, pushes, rebases and edits inside it are
+denied by permission policy, and a refusal is a real result — report it, never work
+around it. After your run the adapter checks that HEAD still equals the sha it
+observed and that the tree is clean; a review produced against a mutated checkout is
+rejected outright, so never run anything that moves HEAD or touches tracked files.
+
+[TERMINAL COMMANDS — ONE LINE, NO DOLLAR SIGNS] Every terminal command must be a
+single line and must not contain a dollar sign: no \$?, no \$HOME, no \$(...), no
+\${...}. The permission engine CANCELS such a call before it runs and ends your turn
+silently — you do not get a refusal to report, you get nothing, and every other
+call in that turn is dropped (canaries 2026-09-02: \$HOME alone killed a turn;
+git merge-base && echo, cmd; cmd, cmd || cmd and pipes all ran fine). The same
+silent cancel hits a multi-line quoted program (python -c \"...\" spanning lines,
+heredocs), process substitution <( ... ), and a regex anchor written as \$ (canary 4:
+echo \"head=\$(git rev-parse HEAD)\" and comm -23 <(...) <(...) were both cancelled).
+Do not use output redirection either. Write python as ONE line with semicolons —
+subprocess.check_output([...]) inside a python one-liner is the way to compare two
+command outputs — get values by piping instead of expanding them, and chain with
+&&, ;, || and | only. NEVER prefix a command with VAR=value (canary 5: that shape
+is cancelled too). ATLAS_DISABLE_LOCAL_MODEL=1 is ALREADY SET in your environment:
+run the suite as plain \`python3.11 -m unittest tests.test_x -v\`. Read-only git
+(log, diff, show, rev-parse, rev-list, merge-base, cat-file, ls-tree, branch
+--contains), gh pr view/checks/diff, gh run list, and the usual text tools (grep,
+sort, comm, awk, cut, wc, diff, jq) are allowed; gh api is denied.
+
+Work SYNCHRONOUSLY and stay in this turn until the review is filed. Do not delegate
+the finish to a background task and then narrate it: a turn that ends with your own
+work unresolved is recorded as a FAILED dispatch.
+
+Before ending this turn you MUST write the return file at ${RET}, whose FIRST THREE
+lines are exactly:
+  STATE: RETURNED        (or BLOCKED if you genuinely could not review)
+  HEAD: <the exact sha you reviewed>
+  PR: <pr number or url, or NONE>
+Obtain the sha with 'git rev-parse HEAD' and paste that output — never a sha from
+memory. A sha that does not resolve to a commit object is rejected as unverifiable.
+
+Then the findings: numbered, each marked BLOCKING or NON-BLOCKING, each with a
+file:line and a concrete failure scenario. Distinguish what you OBSERVED by running
+something from what you INFERRED by reading. Never write VERIFIED about a claim you
+did not mechanically check. If you could not check something, say UNKNOWN — an
+unknown preserved is worth more than a guess presented as a finding.
+
+MERGE-READY is not yours to declare; that is the Lead's or the Principal's. Return
+STATE: RETURNED with your findings, or STATE: BLOCKED with the exact blocker.
+
+[STANDING CONTRACT — reviewer-relevant clauses]
+$(grep -A1 -E "^\[(DISPOSITION|SHA)\]" <LOCAL_HOME>/atlas-ops/CONTRACT.txt | sed "s|{RET}|${RET}|g")"
+
+# ATLAS_DISABLE_LOCAL_MODEL=1 is exported INTO the reviewer's process here, because
+# the repo's suite is invoked as `ATLAS_DISABLE_LOCAL_MODEL=1 python3.11 -m unittest …`
+# and canary 5 (2026-09-02) proved a `VAR=value cmd` prefix is unmatched by every
+# rule and cancels the turn — the allow rule `Bash(ATLAS_DISABLE_LOCAL_MODEL=1*)`
+# never matched anything. DOM-142 lost its whole test run to this and returned
+# "runtime UNKNOWN". A reviewer must never reach the local model anyway.
+# GH_CONFIG_DIR: the isolated HOME hides ~/.config/gh, so `gh pr view/checks` ran
+# unauthenticated in every review to date (DOM-153: "gh failed, GH_TOKEN unset",
+# CI on the sha UNKNOWN). Pointing gh at the real config restores read-only PR
+# and check-run reads; `gh api`, merge, review, close stay denied by rule.
+run_grok() {
+  env -u XAI_API_KEY ATLAS_DISABLE_LOCAL_MODEL=1 HOME="$ISOLATED_HOME" GROK_HOME="$REAL_GROK_HOME" \
+    GH_CONFIG_DIR="<LOCAL_HOME>/.config/gh" \
+    PATH="<LOCAL_HOME>/atlas-ops/operator-state/grok/bin:$PATH" \
+    "$GROK" "$@" --cwd "$WT" -m "$MODEL" --permission-mode dontAsk "${PERMS[@]}"
+}
+
+# --- authoritative SHA: the worktree is the source of truth, not the model ----
+# The model's reported sha is a claim. A reviewer that names its own exact head
+# can claim to have reviewed a commit it never saw, and a well-formed 40-hex
+# value is indistinguishable from a real one until something resolves it
+# (observed 2026-09-01: two different fabricated shas in one dispatch).
+OBSERVED_SHA="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
+if ! [[ "$OBSERVED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "grok-mission: cannot resolve HEAD in $WT — refusing to dispatch a review"
+  echo "grok-mission: a review with no observable head cannot be bound to anything"
+  exit 10
+fi
+if ! git -C "$WT" cat-file -e "${OBSERVED_SHA}^{commit}" 2>/dev/null; then
+  echo "grok-mission: $OBSERVED_SHA does not resolve to a commit object in $WT"
+  exit 10
+fi
+
+# --- isolated reviewer environment, asserted rather than assumed -------------
+# Acceptance invariant (Principal, 2026-09-01): a reviewer must not inherit a
+# write-capable coordination surface. Grok discovers Claude Code config, and
+# unisolated it loaded linear-server from ~/.claude.json — save_issue and
+# save_comment would let a reviewer disposition its own mission. Checked every
+# run, because an inherited side channel that appears later is exactly the kind
+# of drift nobody notices.
+# `--cwd` is a TOP-LEVEL option and is rejected after a subcommand: the first
+# form of this check ran `grok inspect --cwd "$WT"`, which exits with a usage
+# error, produced no output, and refused every dispatch in 0s (observed
+# 2026-09-01, DOM-85 FAILED_NO_RETURN). Fail-closed was correct; the check was
+# wrong. An unrunnable check is now reported as its own condition rather than
+# being indistinguishable from a real isolation failure.
+INSPECT_OUT="$(env -u XAI_API_KEY HOME="$ISOLATED_HOME" GROK_HOME="$REAL_GROK_HOME" \
+  "$GROK" --cwd "$WT" inspect 2>&1)"
+if ! print -r -- "$INSPECT_OUT" | grep -q "MCP Servers"; then
+  echo "grok-mission: REFUSED — the isolation check did not run."
+  echo "grok-mission: 'grok --cwd <wt> inspect' produced no MCP Servers line."
+  echo "grok-mission: first lines of its output:"
+  print -r -- "$INSPECT_OUT" | head -3 | sed 's/^/grok-mission:   /'
+  echo "grok-mission: an unverifiable envelope is not a verified one."
+  exit 12
+fi
+MCP_LINE="$(print -r -- "$INSPECT_OUT" | grep "MCP Servers" | head -1)"
+if [[ "$MCP_LINE" != *"MCP Servers (0)"* ]]; then
+  echo "grok-mission: REFUSED — reviewer environment is not isolated."
+  echo "grok-mission: expected 'MCP Servers (0)', got: ${MCP_LINE}"
+  echo "grok-mission: a reviewer holding a coordination write tool can disposition"
+  echo "grok-mission: its own mission; that is not a reviewer."
+  exit 11
+fi
+
+echo "grok-mission: ${IDENT} | model requested: ${MODEL}"
+echo "grok-mission: worktree ${WT}"
+echo "grok-mission: OBSERVED HEAD ${OBSERVED_SHA} (authoritative; model's value is a claim)"
+echo "grok-mission: subscription auth, XAI_API_KEY absent, MCP Servers (0) confirmed"
+
+SHA_CLAUSE="
+
+[EXACT HEAD] The worktree you are reviewing is at commit ${OBSERVED_SHA}. That value
+is authoritative and was read from the worktree, not from you. Use it verbatim. Do
+not recall, reconstruct, or abbreviate a sha: the adapter overwrites HEAD with the
+observed value and records any disagreement, and a mismatch forces the return to
+BLOCKED — your findings then reach the Lead as unbound claims rather than as a
+review. Confirm it yourself with 'git rev-parse HEAD' if you wish; do not guess.
+
+[HOW TO RETURN] You cannot write outside ${WT}, so do NOT try to create the return
+file. EMIT it as the last thing you print, beginning at column zero:
+STATE: RETURNED
+HEAD: ${OBSERVED_SHA}
+PR: <pr number or url, or NONE>
+followed by your findings. The adapter captures that and files it."
+
+RUNLOG="${LOGDIR}/${IDENT}.json"
+: > "$RUNLOG"
+attempt_out="${LOGDIR}/${IDENT}.attempt"
+
+salvage() {
+  # stdout is CANDIDATE material, never return truth.
+  # zsh does not word-split an unquoted ${var:+...} expansion (no SH_WORD_SPLIT),
+  # so `${EXPECT_PR:+--pr "$EXPECT_PR"}` reached argparse as ONE token, "--pr 65",
+  # and every review salvage died with "unrecognized arguments". DOM-97's Grok
+  # verdict sat in the attempt log while the dispatcher recorded QUOTA_WAIT;
+  # DOM-105 failed in 106s the same way. Arrays split; expansions do not.
+  local -a pr_args=()
+  [[ -n "${EXPECT_PR:-}" ]] && pr_args=(--pr "$EXPECT_PR")
+  <LOCAL_HOME>/atlas-ops/bin/grok-return-validate \
+    "$attempt_out" "$OBSERVED_SHA" "$RET" "$IDENT" \
+    --worktree "$WT" "${pr_args[@]}"
+}
+
+run_grok -p "$(cat "$PACKET")${CONTRACT}${SHA_CLAUSE}" --output-format json 2>&1 \
+  | tee "$attempt_out" | tail -40
+cat "$attempt_out" >> "$RUNLOG"
+echo "--- grok-mission: initial run finished; salvaging return from stdout ---"
+salvage
+
+i=0
+while [[ ! -f "$RET" ]] && (( i < NUDGES )); do
+  (( i++ ))
+  echo "--- grok-mission nudge $i/$NUDGES (no valid return yet; continuing session) ---"
+  run_grok -c -p "Your turn ended without a usable return. Do NOT try to write a file. PRINT the return now as the last thing you output, starting at column zero, exactly: a STATE: line (RETURNED, or BLOCKED if something genuinely stopped you), then HEAD: ${OBSERVED_SHA}, then a PR: line, then your findings. A permission refusal is a result to report under BLOCKED, never something to route around. A turn that ends without those three lines is recorded as FAILED_NO_RETURN and your work is lost.${SHA_CLAUSE}" \
+    --output-format json 2>&1 | tee "$attempt_out" | tail -30
+  cat "$attempt_out" >> "$RUNLOG"
+  salvage
+done
+
+# --- record the EXECUTING model identity, which differs from the requested one
+# `grok models` reports grok-4.6; the usage block of a real call reports
+# grok-4.6-build. Pinning the request name alone does not say which artifact
+# answered, so the executing identity is recorded from the run itself.
+EXEC_MODEL="$(python3.11 - "$RUNLOG" <<'PY' 2>/dev/null
+import json,re,sys
+seen=[]
+for blob in re.findall(r'\{.*?"modelUsage".*?\}\s*$', open(sys.argv[1]).read(), re.S|re.M):
+    try: seen += list(json.loads(blob).get("modelUsage",{}))
+    except Exception: pass
+print(",".join(dict.fromkeys(seen)) or "UNKNOWN")
+PY
+)"
+echo "grok-mission: model requested=${MODEL} executed=${EXEC_MODEL:-UNKNOWN}"
+
+# --- checkout integrity: the semantic guard that replaced the `git*merge*` deny
+# (2026-09-02). A review is bound to OBSERVED_SHA; if the worktree's HEAD moved or
+# tracked files changed during the run, whatever the model observed after that
+# point is not the candidate, and the return is rejected as evidence.
+AFTER_SHA="$(git -C "$WT" rev-parse HEAD 2>/dev/null)"
+AFTER_DIRTY="$(git -C "$WT" status --porcelain --untracked-files=no 2>/dev/null)"
+if [[ "$AFTER_SHA" != "$OBSERVED_SHA" || -n "$AFTER_DIRTY" ]]; then
+  echo "grok-mission: CHECKOUT MUTATED during the review — HEAD ${OBSERVED_SHA} -> ${AFTER_SHA:-unresolvable}; dirty tracked files: $(printf '%s' "$AFTER_DIRTY" | wc -l | tr -d ' ')"
+  if [[ -f "$RET" ]]; then
+    mv "$RET" "${RET%.md}.checkout-mutated"
+    echo "grok-mission: return REJECTED and preserved at ${RET%.md}.checkout-mutated — a verdict produced against a mutated checkout is not evidence about ${OBSERVED_SHA}"
+  fi
+  git -C "$WT" checkout --detach --quiet "$OBSERVED_SHA" 2>/dev/null && git -C "$WT" checkout -- . 2>/dev/null \
+    && echo "grok-mission: worktree restored to ${OBSERVED_SHA}" || echo "grok-mission: could not restore worktree — human must inspect ${WT}"
+  exit 9
+fi
+
+if [[ -f "$RET" ]]; then
+  if head -1 "$RET" | grep -qE '^STATE:[[:space:]]*(RETURNED|MERGE-READY|BLOCKED|FAILED)$'; then
+    echo "grok-mission: return filed after ${i} nudge(s) — $(head -1 "$RET")"
+    echo "grok-mission: $(sed -n 2p "$RET")"
+    exit 0
+  fi
+  echo "grok-mission: return exists but its STATE line is malformed"
+  head -3 "$RET"
+  exit 6
+fi
+echo "grok-mission: NO USABLE RETURN after initial run + ${NUDGES} nudges — honest failure"
+echo "grok-mission: candidate output preserved at ${RUNLOG}"
+exit 7

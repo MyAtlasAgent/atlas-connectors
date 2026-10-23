@@ -1,0 +1,9 @@
+def confirm_lane_started(cs, out, rc):
+    """Record that a lane's session now exists — only on evidence it was created."""
+    if cs not in LANES: return
+    started = f"{OPS}/state/sessions/{cs}.started"
+    if os.path.isfile(started): return
+    if rc == 0 and "No conversation found" not in (out or ""):
+        os.makedirs(f"{OPS}/state/sessions", exist_ok=True)
+        open(started, "w").write(f"{LANES[cs]['uuid']}\n{now()}\n")
+        log(f"lane {cs} session established; future dispatches will --resume it")

@@ -1,0 +1,64 @@
+def build_cmd(op, packet, worktree, callsign=""):
+    prompt = (f"Read the mission packet at {packet} and execute it exactly. You are the "
+              f"sole owner of the active step. Write your return to "
+              f"{OPS}/returns/{{IDENT}}.md with required lines STATE:/HEAD:/PR:. "
+              f"Stop where the packet says stop. Do not merge; do not push main.")
+    # The contract binds EVERY prompt mode. It was previously appended only for
+    # 'inline', so pointer-mode operators (Claude) never received it and ended
+    # their turn with work uncommitted — the premature-return class, unfixed for
+    # the one operator whose adapter did not carry the clause (2026-09-01).
+    CONTRACT = (
+        "\n\n[DISPATCH CONTRACT] Work SYNCHRONOUSLY: run every command in the "
+        "foreground and wait for it. Before ending your turn you MUST satisfy the "
+        "return contract — commit and push any work the packet requires, then write "
+        f"the return file at {OPS}/returns/{{IDENT}}.md with STATE:/HEAD:/PR: as its "
+        "first lines (or print those lines if your sandbox is read-only). If you "
+        "cannot finish, still write the return with STATE: BLOCKED and the exact "
+        "blocker. Ending your turn with work uncommitted or no return is recorded "
+        "as a FAILED dispatch and the work may be lost."
+        "\n\n[BASE RECONCILIATION — required before you push] Run `git fetch origin` "
+        "and merge `origin/main` into your branch before pushing. Merge, never "
+        "rebase, and never force-push: review verdicts are bound to commits and "
+        "rewriting history voids them. This is not hygiene — a pull request that "
+        "CONFLICTS with main gets NO CI RUN AT ALL, because GitHub cannot build the "
+        "virtual merge commit that `pull_request` workflows execute against. The "
+        "absence then reads as failure. Verified 2026-09-01 across seven open PRs: "
+        "both DIRTY ones had zero runs, all five CLEAN ones had CI. If mutation "
+        "numbers collide during the merge, renumber YOUR OWN to free numbers "
+        "(`<OPS_ROOT>/bin/mutation-namespace-check` prints the next free one) and "
+        "re-run the mutation suite afterwards — a renumber that breaks a `find` "
+        "anchor turns a real mutation into one that always passes."
+        "\n\n[PUBLICATION] 'Do not push main' means the PROTECTED BRANCH ONLY. You MUST "
+        "push your own feature branch — a commit that exists only in your worktree is not "
+        "evidence anyone else can see, and a reviewer cannot fetch it. Before returning: "
+        "`git push origin <your-branch>`, then confirm the PR head equals your sha. A "
+        "returned head that resolves locally but sits on no remote ref is recorded as "
+        "RETURNED_SHA_NOT_REMOTE and blocks the fresh review. (DOM-90 read 'do not push "
+        "main' as 'do not push', committed a complete repair, and stranded it locally.)"
+        "\n\n[PR BODY — part of publishing, not optional] After you push, the pull request "
+        "body MUST name the head you just pushed: put the output of `git rev-parse HEAD` in "
+        "a 'Head:' line near the top and label every earlier sha the body mentions as "
+        "historical evidence bound to an earlier head. `<OPS_ROOT>/bin/review-prep` refuses "
+        "to spend a reviewer on a PR whose body cites shas that are not its head — on "
+        "2026-09-02 a green, clean candidate lost three review slots to a stale 'Head at "
+        "time of writing' line. Use `gh pr edit <N> --repo <owner/repo> --body-file <file>`; "
+        "this is metadata, not a commit."
+        "\n\n[DISPOSITION] Return STATE: RETURNED. MERGE-READY is a reviewer's or the "
+        "Lead's verdict about your work, never your own verdict about it — a builder "
+        "cannot certify the thing it built, and that holds however confident you are "
+        "and however green the checks. Say what you did and what you could not prove; "
+        "the disposition is assigned to you."
+        "\n\n[SHA] Never type a sha from memory. Emit it: `git rev-parse HEAD`, paste "
+        "the output. A returned HEAD is resolved against the object store and one "
+        "that names no commit is recorded as UNVERIFIABLE, not as evidence.")
+    if op["prompt_mode"] == "inline":
+        prompt = open(packet).read() + CONTRACT
+    else:
+        prompt = prompt + CONTRACT
+    cmd = [a.replace("{prompt}", prompt).replace("{packet}", packet)
+            .replace("{worktree}", worktree) for a in op["cmd"]]
+    cmd = apply_model_routing(op, cmd, packet)
+    write_route_receipt(op, packet, worktree, callsign, cmd)
+    for bad in CFG["forbidden_flags"]:
+        if any(bad in a for a in cmd): raise RuntimeError(f"forbidden flag {bad}")
+    return cmd

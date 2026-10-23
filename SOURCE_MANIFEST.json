@@ -1,0 +1,133 @@
+{
+  "package_status": "SOURCE_EXTRACTION_PREVIEW",
+  "source_revision": "138fed3bd3bf0738f6c5eee8b35814facd0ef429",
+  "source_state": "Pinned main snapshot; not PR 282 and not installed-runtime attestation",
+  "files": [
+    {
+      "path": "reference/shared/build_cmd.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:ops/runtime/atlas-dispatch",
+      "source_sha256": "c41c3123890d40915f24fed751ca1b92cf8406e91d03c61d405f87e42db3690c",
+      "selected_lines": [
+        571,
+        634
+      ],
+      "packaged_sha256": "03d94149918074f1f2710dc3e9c12987bc1ce64ab0caef6bb3a10ca9e981fddd",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/shared/lane_identity_args.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:ops/runtime/atlas-dispatch",
+      "source_sha256": "c41c3123890d40915f24fed751ca1b92cf8406e91d03c61d405f87e42db3690c",
+      "selected_lines": [
+        496,
+        507
+      ],
+      "packaged_sha256": "0232b16aa51fe16bb206c8d9ad3e1d7151d64f36a16f72d9761134aa1062fe97",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/shared/confirm_lane_started.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:ops/runtime/atlas-dispatch",
+      "source_sha256": "c41c3123890d40915f24fed751ca1b92cf8406e91d03c61d405f87e42db3690c",
+      "selected_lines": [
+        509,
+        517
+      ],
+      "packaged_sha256": "68e0baf522f56381af3a7128c8dddef77db5e214469eb42aa18e54e94af80e58",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/claude/endpoint.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:atlas_prime/courier/endpoint.py",
+      "source_sha256": "9d35eb4d775df194d2c7df1ee1c9ea522cb42f9eb7930d5a458c22b3537987cc",
+      "selected_lines": null,
+      "packaged_sha256": "9d35eb4d775df194d2c7df1ee1c9ea522cb42f9eb7930d5a458c22b3537987cc",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/claude/permission_policy.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:atlas_prime/courier/permission_policy.py",
+      "source_sha256": "a5d8b5cfaf8bc203220706bbf69600120c6c648eaae7367d62df1c0af1e95a61",
+      "selected_lines": null,
+      "packaged_sha256": "a5d8b5cfaf8bc203220706bbf69600120c6c648eaae7367d62df1c0af1e95a61",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/claude/telemetry.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:atlas_prime/courier/telemetry.py",
+      "source_sha256": "c12e53c8dd1b02420e3633d88d50b3d9039a6fb79e69c02d85c03a83a4c030db",
+      "selected_lines": null,
+      "packaged_sha256": "c12e53c8dd1b02420e3633d88d50b3d9039a6fb79e69c02d85c03a83a4c030db",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/shared/provenance.py.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:atlas_prime/core/provenance.py",
+      "source_sha256": "ccc265644789ee7862793d84534bdee92154d8d81af1db16c8807aea391a0d60",
+      "selected_lines": null,
+      "packaged_sha256": "ccc265644789ee7862793d84534bdee92154d8d81af1db16c8807aea391a0d60",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/grok/grok-mission.zsh.txt",
+      "origin": "git:138fed3bd3bf0738f6c5eee8b35814facd0ef429:ops/runtime/grok-launch/grok-mission",
+      "source_sha256": "1f425e35448a06b30609406f894e8f244340558f10b610b2b42e57cefa02fbd2",
+      "selected_lines": null,
+      "packaged_sha256": "98692cc8c09c783e3254a559b31ea0dd40431a53a4534920ae5f01a2fe8a75ee",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    },
+    {
+      "path": "reference/grok/grok-return-validate.py.txt",
+      "origin": "installed-file:grok-return-validate; source acceptance and lineage unverified",
+      "source_sha256": "8bec15d1593a6dd97078f995731d30d5d5f69906c99b559d2513aa04b13fc32b",
+      "selected_lines": null,
+      "packaged_sha256": "8bec15d1593a6dd97078f995731d30d5d5f69906c99b559d2513aa04b13fc32b",
+      "transformations": [
+        "local home and ops-root placeholders",
+        "email placeholders",
+        "UUID/session-id placeholders"
+      ],
+      "executable": false
+    }
+  ]
+}

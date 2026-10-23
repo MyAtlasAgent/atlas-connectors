@@ -1,0 +1,345 @@
+"""
+The bounded permission a dispatch runs under.
+
+Architectural law 6 of COURIER-ATLAS-001: never `--dangerously-skip-permissions`
+or any equivalent global approval or sandbox bypass. Use only the narrow,
+provider-supported permission the bounded action actually needs.
+
+Two mechanisms, because one is not enough
+-----------------------------------------
+**Declaring** the permission and **refusing** a bypass are different jobs.
+`BoundedPermission` builds a narrow argv from an explicit allowlist. But a
+caller can also pass extra arguments, an operator can paste a flag into a
+config, and a future CLI release can invent a new bypass nobody has heard of.
+So `enforce()` re-reads the *final* argv -- the exact list about to be executed,
+including anything Courier itself contributed -- and refuses on what it finds.
+Checking only the caller's extras would leave the assembled command unchecked,
+which is the one list that matters.
+
+The catch-all rule
+------------------
+Named flags are refused by name. Beyond that, **any token containing
+"dangerously" is refused**, and so is any `--permission-mode` whose value is not
+on the narrow allowlist. This is deliberately a denylist plus an allowlist
+rather than a denylist alone: the named list goes stale the moment a provider
+ships a new escape hatch, and a courier that silently accepts an unrecognised
+permission mode is a courier that will one day run unbounded because a flag was
+renamed.
+
+Why `auto` and `dontAsk` are refused alongside `bypassPermissions`
+------------------------------------------------------------------
+`bypassPermissions` is the obvious bypass. `auto` and `dontAsk` are not
+bypasses, but they *delegate the decision* -- they hand the permission question
+to a classifier or to a blanket yes, and neither is a declaration of what this
+dispatch is allowed to do. Law 6 asks for the narrow permission needed for the
+bounded action, which means Courier has to be able to state that permission.
+A mode that cannot be stated cannot be bounded, so it is refused here and the
+caller must name what it actually needs.
+
+Contract note (Claude Code 2.1.246)
+-----------------------------------
+`--tools ""` disables all tools and `--tools default` re-enables the whole
+built-in set. An empty allowlist is therefore meaningful and is accepted; the
+literal string `default` is refused, because it is an allowlist that allows
+everything and would make the declaration a formality.
+
+The environment is part of the boundary (R1, finding 1)
+-------------------------------------------------------
+Independent review found that a clean argv was being handed to a child process
+that inherited the *entire* parent environment. Two things were wrong with
+that. The narrow one: `enforce()` could check `PROHIBITED_ENV`, but the
+production path never passed it an environment, so the rule was unit-tested and
+unenforced. The wide one, and the reason this is a P0: a stray
+`ANTHROPIC_API_KEY` in the parent shell silently converts a subscription-backed
+invocation into API-billed execution. That is not a hypothetical -- it is what
+happened during this mission's own contract probes, and it is why the observed
+`total_cost_usd` figures are list-price references against an API key rather
+than measurements of subscription use.
+
+So the child environment is **built from an allowlist**, not filtered from the
+parent. A denylist would have to anticipate every variable that can redirect
+authentication or billing, across three cloud providers, forever; the first one
+it missed would fail silently and look exactly like success.
+`enforce_environment()` then re-checks the constructed environment for the
+known overrides -- belt and braces, so a future edit that widens the allowlist
+trips a test instead of shipping.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+# Flags that hand over global approval. Refused by name, wherever they appear.
+PROHIBITED_FLAGS = frozenset({
+    "--dangerously-skip-permissions",
+    "--allow-dangerously-skip-permissions",
+})
+
+# The substring rule that outlives the list above.
+PROHIBITED_SUBSTRING = "dangerously"
+
+# Permission modes Courier will run under. Each one still asks, or still
+# constrains what may be written; none of them delegates the question.
+ALLOWED_PERMISSION_MODES = ("plan", "manual", "acceptEdits")
+
+# Named separately so the refusal can say *why* each is refused rather than
+# just "unrecognised".
+DELEGATING_PERMISSION_MODES = {
+    "bypassPermissions": "it disables permission checks entirely",
+    "auto": "it delegates the permission decision to a classifier instead of "
+            "declaring what this dispatch may do",
+    "dontAsk": "it answers every future permission question with yes",
+}
+
+# An allowlist value that allows everything, which is not an allowlist.
+UNBOUNDED_TOOL_TOKEN = "default"
+
+# Environment variables that switch off permission enforcement out of band. A
+# clean argv means nothing if the environment carries the bypass instead.
+PROHIBITED_ENV = frozenset({
+    "CLAUDE_CODE_DANGEROUSLY_SKIP_PERMISSIONS",
+    "IS_SANDBOX",
+})
+
+# Variables that redirect *who pays* or *who authenticates*. None of them
+# disables a permission check, which is why they need naming separately: they
+# silently move the run off the endpoint's own provider-owned subscription
+# authentication and onto API or cloud-marketplace billing. The endpoint is
+# supposed to authenticate exactly as a human at the same terminal would.
+AUTH_OVERRIDE_ENV = frozenset({
+    # Anthropic first-party
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_API_URL", "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BETAS",
+    "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    # Third-party gateways
+    "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+    "AWS_BEARER_TOKEN_BEDROCK", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION",
+    "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT",
+    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION",
+    # Credential indirection
+    "CLAUDE_CODE_API_KEY_HELPER", "CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+})
+
+# What a dispatched endpoint is allowed to inherit. Process hygiene only:
+# where to find binaries, who the user is, where the home directory and the
+# temporary directory are, and how to render text. Provider authentication is
+# reached through the user's own credential store under HOME, exactly as it is
+# for a human at the same terminal -- so HOME is inherited and every credential
+# *override* is not.
+#
+# Windows names are included because Windows support is a standing constraint;
+# a child started without SYSTEMROOT or PATHEXT there does not run at all.
+INHERITABLE_ENV = (
+    # POSIX
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "LC_CTYPE",
+    "TERM", "TMPDIR", "TZ", "XDG_CACHE_HOME", "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    # Windows
+    "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE",
+    "HOMEDRIVE", "HOMEPATH", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+    "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)", "TEMP", "TMP",
+    "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "OS", "USERNAME",
+)
+
+
+class PermissionPolicyError(RuntimeError):
+    """A dispatch that would run wider than its declared bounds."""
+
+
+@dataclass(frozen=True)
+class BoundedPermission:
+    """What one dispatch is permitted to do, stated explicitly."""
+
+    permission_mode: str = "plan"
+    allowed_tools: Sequence[str] = field(default_factory=tuple)
+    add_dirs: Sequence[str] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        mode = (self.permission_mode or "").strip()
+        if mode in DELEGATING_PERMISSION_MODES:
+            raise PermissionPolicyError(
+                f"Permission mode '{mode}' is refused because "
+                f"{DELEGATING_PERMISSION_MODES[mode]}. Courier must be able to "
+                f"state the narrow permission this dispatch runs under; choose "
+                f"one of {', '.join(ALLOWED_PERMISSION_MODES)}.")
+        if mode not in ALLOWED_PERMISSION_MODES:
+            raise PermissionPolicyError(
+                f"Permission mode '{mode}' is not one Courier has validated. "
+                f"Allowed: {', '.join(ALLOWED_PERMISSION_MODES)}. An "
+                f"unrecognised mode is refused rather than passed through, "
+                f"because a mode that is renamed or added upstream must not "
+                f"become a silent widening here.")
+        object.__setattr__(self, "permission_mode", mode)
+
+        tools: List[str] = []
+        for tool in self.allowed_tools or ():
+            name = (tool or "").strip()
+            if not name:
+                continue
+            if name.lower() == UNBOUNDED_TOOL_TOKEN:
+                raise PermissionPolicyError(
+                    f"'{UNBOUNDED_TOOL_TOKEN}' enables the entire built-in tool "
+                    f"set, so it is an allowlist that allows everything. Name "
+                    f"the tools this dispatch needs.")
+            if PROHIBITED_SUBSTRING in name.lower():
+                raise PermissionPolicyError(
+                    f"Tool entry '{name}' contains '{PROHIBITED_SUBSTRING}'.")
+            tools.append(name)
+        object.__setattr__(self, "allowed_tools", tuple(tools))
+        object.__setattr__(
+            self, "add_dirs",
+            tuple((d or "").strip() for d in (self.add_dirs or ()) if (d or "").strip()))
+
+    def to_argv(self) -> List[str]:
+        """The permission flags, and only those.
+
+        `--tools` is always emitted, even when the allowlist is empty: an
+        omitted flag would inherit the default tool set, which is the opposite
+        of what an empty allowlist means.
+        """
+        argv: List[str] = ["--permission-mode", self.permission_mode,
+                           "--tools", ",".join(self.allowed_tools)]
+        for directory in self.add_dirs:
+            argv.extend(["--add-dir", directory])
+        return argv
+
+    def describe(self) -> str:
+        tools = ", ".join(self.allowed_tools) if self.allowed_tools else "none"
+        return f"permission-mode={self.permission_mode}; tools={tools}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["allowed_tools"] = list(self.allowed_tools)
+        data["add_dirs"] = list(self.add_dirs)
+        return data
+
+
+def _mode_values(argv: Sequence[str]) -> List[Tuple[int, str]]:
+    """Every `--permission-mode` value in argv, in both spellings."""
+    found: List[Tuple[int, str]] = []
+    for index, token in enumerate(argv):
+        if token == "--permission-mode" and index + 1 < len(argv):
+            found.append((index, argv[index + 1]))
+        elif token.startswith("--permission-mode="):
+            found.append((index, token.split("=", 1)[1]))
+    return found
+
+
+def enforce(argv: Sequence[str],
+            env: Optional[Mapping[str, str]] = None) -> None:
+    """Refuse an argv that would run wider than a bounded action.
+
+    Called on the *assembled* command immediately before execution, so nothing
+    -- caller extras, Courier's own flags, a future addition -- reaches the
+    provider unchecked. Raises `PermissionPolicyError`; returns None when the
+    command is within bounds.
+    """
+    tokens = [str(token) for token in (argv or ())]
+
+    for token in tokens:
+        bare = token.split("=", 1)[0]
+        if bare in PROHIBITED_FLAGS or token in PROHIBITED_FLAGS:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: '{bare}' bypasses permission checks "
+                f"globally. COURIER-ATLAS-001 architectural law 6 forbids it. "
+                f"Grant the narrow permission the action needs instead.")
+        if PROHIBITED_SUBSTRING in token.lower():
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: argument '{token}' contains "
+                f"'{PROHIBITED_SUBSTRING}'. Courier refuses the whole family of "
+                f"bypass flags by substring, not only the ones it knows by "
+                f"name, so a renamed or newly added escape hatch cannot slip "
+                f"through unnoticed.")
+
+    for _, value in _mode_values(tokens):
+        mode = (value or "").strip()
+        if mode in DELEGATING_PERMISSION_MODES:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: --permission-mode {mode} is not a "
+                f"bounded permission because {DELEGATING_PERMISSION_MODES[mode]}.")
+        if mode not in ALLOWED_PERMISSION_MODES:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: --permission-mode {mode!r} is not on "
+                f"Courier's validated list "
+                f"({', '.join(ALLOWED_PERMISSION_MODES)}).")
+
+    for index, token in enumerate(tokens):
+        value = None
+        if token == "--tools" and index + 1 < len(tokens):
+            value = tokens[index + 1]
+        elif token.startswith("--tools="):
+            value = token.split("=", 1)[1]
+        if value is not None and value.strip().lower() == UNBOUNDED_TOOL_TOKEN:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: --tools {UNBOUNDED_TOOL_TOKEN} enables "
+                f"every built-in tool, which is not a bounded action.")
+
+    if env is not None:
+        enforce_environment(env)
+
+
+def enforce_environment(env: Mapping[str, str]) -> None:
+    """Refuse an environment that relaxes permissions or redirects billing.
+
+    Separate from the allowlist in `child_environment()` on purpose. The
+    allowlist is what builds a safe environment; this is what proves one is
+    safe. A future edit that adds a variable to `INHERITABLE_ENV` without
+    thinking it through trips here rather than shipping.
+    """
+    present = {name.upper() for name in (env or {})}
+
+    for name in sorted(PROHIBITED_ENV):
+        if name in present:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: the environment sets {name}, which "
+                f"relaxes permission enforcement out of band. A clean argv is "
+                f"not a bounded action if the environment carries the bypass.")
+
+    for name in sorted(AUTH_OVERRIDE_ENV):
+        if name in present:
+            raise PermissionPolicyError(
+                f"Refusing to dispatch: the environment sets {name}, which "
+                f"redirects who authenticates or who pays for this run. The "
+                f"endpoint must authenticate through the operator's own "
+                f"provider-owned credentials, exactly as a human at the same "
+                f"terminal would. Leaking this variable into the child turns a "
+                f"subscription-backed invocation into API-billed execution "
+                f"without anything in the record saying so.")
+
+
+def child_environment(parent_env: Optional[Mapping[str, str]] = None,
+                      ) -> Dict[str, str]:
+    """Build the environment a dispatched endpoint runs under.
+
+    Constructed from `INHERITABLE_ENV`, never filtered from the parent. A
+    denylist would have to anticipate every variable that can redirect
+    authentication or billing across three cloud providers, forever, and the
+    first one it missed would fail silently and look exactly like success.
+
+    Matching is case-insensitive because Windows environment variables are,
+    while the dict Python hands out is not; the parent's own spelling of the
+    name is preserved so the child sees what it expects.
+    """
+    source = dict(parent_env if parent_env is not None else os.environ)
+    wanted = {name.upper() for name in INHERITABLE_ENV}
+    built = {name: value for name, value in source.items()
+             if name.upper() in wanted}
+    # The allowlist should make this unreachable. It runs anyway: an
+    # unenforceable rule is how finding 1 happened in the first place.
+    enforce_environment(built)
+    return built
+
+
+def bounded_argv(permission: BoundedPermission,
+                 extra: Iterable[str] = ()) -> List[str]:
+    """Permission flags plus caller extras, enforced before it is returned."""
+    argv = permission.to_argv() + [str(token) for token in (extra or ())]
+    enforce(argv)
+    return argv

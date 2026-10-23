@@ -1,0 +1,141 @@
+#!/usr/bin/env python3.11
+"""Turn a Grok run's stdout into an Atlas return — or refuse to.
+
+Usage: grok-return-validate <run-output> <observed-sha> <return-path> <ident>
+       [--pr <expected>] [--worktree <path>]
+
+stdout is CANDIDATE MATERIAL, never return truth. The authoritative SHA comes
+from the worktree the adapter materialized, not from anything the model said:
+a reviewer that can name its own exact head can claim to have reviewed a commit
+it never saw, and a well-formed 40-hex value is indistinguishable from a real
+one until something resolves it. So the model's HEAD is recorded as a *claim*
+and the observed SHA is what is written.
+
+Exit 0 persisted a return; 3 found no usable candidate; 4 refused one.
+"""
+from __future__ import annotations
+import argparse, json, os, re, subprocess, sys
+
+STATES = {"RETURNED", "MERGE-READY", "BLOCKED", "FAILED"}
+# Values a truncated or lazy run echoes back from the packet template. A
+# placeholder that satisfies a regex is how a non-return became a return once
+# already (dispatcher class #6, 2026-08-31).
+PLACEHOLDER = re.compile(
+    r"^(<.*>|none|n/?a|tbd|xxx+|\.\.\.|the exact sha.*|sha)$", re.I)
+
+
+def candidate_text(raw: str) -> str:
+    """The model's message, dug out of whichever output format was used."""
+    chunks = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("{") and '"text"' in line:
+            try:
+                chunks.append(str(json.loads(line).get("text") or ""))
+            except ValueError:
+                pass
+    # --output-format json emits one pretty-printed object per run.
+    for blob in re.findall(r"\{\s*\n\s*\"text\".*?\n\}", raw, re.S):
+        try:
+            chunks.append(str(json.loads(blob).get("text") or ""))
+        except ValueError:
+            pass
+    # Plain format, or a JSON parse that found nothing: fall back to the raw
+    # stream. It is only ever a *candidate*, so a false positive here is caught
+    # by the field validation below rather than becoming a return.
+    chunks.append(raw)
+    return "\n\n".join(c for c in chunks if c.strip())
+
+
+def field(text: str, name: str) -> str:
+    m = re.search(rf"^{name}:[ \t]*(.+)$", text, re.M)
+    return m.group(1).strip() if m else ""
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("run_output"); ap.add_argument("observed_sha")
+    ap.add_argument("return_path"); ap.add_argument("ident")
+    ap.add_argument("--pr", default=""); ap.add_argument("--worktree", default="")
+    a = ap.parse_args()
+
+    observed = a.observed_sha.strip()
+    if not re.fullmatch(r"[0-9a-f]{40}", observed):
+        print(f"validate: adapter supplied a non-sha observed value {observed!r}")
+        return 4
+    # The authoritative sha must resolve to a real commit in the real worktree.
+    if a.worktree:
+        try:
+            subprocess.run(["git", "-C", a.worktree, "cat-file", "-e",
+                            f"{observed}^{{commit}}"], check=True,
+                           capture_output=True)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            print(f"validate: observed sha does not resolve to a commit: {exc}")
+            return 4
+
+    raw = open(a.run_output, encoding="utf-8", errors="replace").read()
+    text = candidate_text(raw)
+
+    state = (field(text, "STATE") or "").upper()
+    claimed = field(text, "HEAD")
+    pr = field(text, "PR")
+
+    if state not in STATES:
+        print(f"validate: no usable STATE in candidate output (found {state!r})")
+        return 3
+    if PLACEHOLDER.match(claimed or "") and claimed:
+        print(f"validate: HEAD is the packet's own placeholder ({claimed!r}); "
+              f"a template echoed back is not a return")
+        return 4
+
+    # --- truth binding -----------------------------------------------------
+    # The returned sha is compared, never trusted. On disagreement the return is
+    # still persisted, as BLOCKED, so custody and the evidence survive — a
+    # silently dropped return is a lost mission, and the mismatch is exactly the
+    # thing a human needs to see.
+    mismatch = bool(claimed) and claimed.lower() != observed.lower()
+    short = bool(claimed) and not mismatch and len(claimed) < 40
+
+    if mismatch:
+        state = "BLOCKED"
+
+    body = text
+    header = [f"STATE: {state}", f"HEAD: {observed}", f"PR: {pr or 'NONE'}", ""]
+    prov = ["<!-- atlas: return assembled by grok-return-validate -->",
+            f"<!-- ident: {a.ident} -->",
+            f"<!-- HEAD above is the sha OBSERVED in the worktree by the adapter,",
+            f"     not a value supplied by the model. -->"]
+    if claimed:
+        prov.append(f"<!-- model-claimed HEAD: {claimed} "
+                    f"({'MISMATCH' if mismatch else 'short form' if short else 'agrees'}) -->")
+    else:
+        prov.append("<!-- model supplied no HEAD; observed sha used -->")
+    if a.pr and pr and a.pr.lstrip('#') not in pr:
+        prov.append(f"<!-- PR identity: packet expected {a.pr}, return said {pr} -->")
+
+    note = []
+    if mismatch:
+        note = ["",
+                "## ADAPTER REFUSAL — SHA MISMATCH",
+                "",
+                f"The reviewer reported `HEAD: {claimed}`. The worktree it was given "
+                f"is at `{observed}`.",
+                "",
+                "A review is only evidence about the commit it actually read, so this "
+                "return cannot be ingested as a review of either sha: the findings "
+                "below may be about the real tree, or about a commit that does not "
+                "exist. The state is forced to BLOCKED and the observed sha is "
+                "recorded above. The findings are preserved verbatim as claims.",
+                ""]
+
+    os.makedirs(os.path.dirname(a.return_path), exist_ok=True)
+    with open(a.return_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(header + prov + note) + "\n\n" + body.strip() + "\n")
+
+    print(f"validate: persisted {a.return_path} STATE={state} HEAD={observed}"
+          + (f" (model claimed {claimed} — MISMATCH)" if mismatch else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

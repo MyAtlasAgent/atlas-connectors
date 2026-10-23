@@ -1,0 +1,20 @@
+{
+  "description": "Illustrative command shapes only; not a current CLI compatibility claim or live launch configuration",
+  "claude": {
+    "prompt_mode": "pointer",
+    "cmd": ["claude", "-p", "{prompt}"]
+  },
+  "codex": {
+    "prompt_mode": "inline",
+    "cmd": ["codex", "-s", "read-only", "exec", "-o", "{worktree}/return.md", "{prompt}"]
+  },
+  "supergrok_cli": {
+    "prompt_mode": "file",
+    "cmd": ["grok-mission", "{packet}", "{worktree}/return.md", "{worktree}"]
+  },
+  "grok_bot_desktop": {
+    "transport": "manual_delivery",
+    "cmd": null,
+    "automatic_connector": "NOT_FOUND_IN_INSPECTED_SOURCES"
+  }
+}

@@ -1,0 +1,158 @@
+"""
+Resource facts, with UNKNOWN preserved as UNKNOWN.
+
+Architectural law 7 of COURIER-ATLAS-001: a `reported_cost_usd` of `null`,
+an unknown quota and an unknown billing arrangement stay unknown. None of them
+is ever rewritten as `$0`.
+
+Why this is a module and not two lines
+--------------------------------------
+Because the lossy version is the natural one. `float(envelope.get(
+"total_cost_usd") or 0)` is shorter, it never raises, and it turns "nobody
+knows what this cost" into "this cost nothing" -- which then sums, averages,
+and charts as if it were a measurement. Subscription-backed execution makes
+that failure routine rather than rare: a run on a Max subscription may report
+no dollar figure at all, and every such run would silently become free.
+
+So the unknown is given a name and carried in a field of its own. A caller that
+wants a number has to look at `cost_state` to find out whether one exists, and
+`billable_total` refuses to add up a set containing an unknown rather than
+quietly treating it as zero.
+
+What is actually known on Claude Code 2.1.246
+---------------------------------------------
+Observed on this workstation, 2026-08-28:
+
+* `total_cost_usd` is present and non-null when the run authenticates with an
+  `ANTHROPIC_API_KEY`. It is a list-price computation, not an invoice.
+* No quota, allowance, or remaining-usage figure appears anywhere in the result
+  envelope. `quota_state` is therefore `unknown` on every run, and it is not
+  inferred from cost.
+* The envelope does not state which billing arrangement paid for the run.
+  Courier records the arrangement the *caller declared*, marked as declared,
+  and does not guess it from the presence of a cost figure -- a subscription
+  session with a stray API key set is the exact case where guessing is wrong.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Iterable, Optional
+
+UNKNOWN = "unknown"
+REPORTED = "reported"
+DECLARED = "declared"
+
+# Billing arrangements a caller may declare. None of them is ever inferred.
+BILLING_SUBSCRIPTION = "subscription"
+BILLING_API_KEY = "api_key"
+BILLING_MODES = (BILLING_SUBSCRIPTION, BILLING_API_KEY, UNKNOWN)
+
+
+class TelemetryError(ValueError):
+    """A resource figure that cannot be recorded honestly."""
+
+
+@dataclass(frozen=True)
+class ResourceTelemetry:
+    """What a dispatch is known to have consumed, and what is not known."""
+
+    reported_cost_usd: Optional[float] = None
+    cost_state: str = UNKNOWN
+    quota_state: str = UNKNOWN
+    billing_mode: str = UNKNOWN
+    billing_state: str = UNKNOWN
+    note: str = ""
+
+    @property
+    def cost_is_known(self) -> bool:
+        return self.cost_state == REPORTED and self.reported_cost_usd is not None
+
+    def display_cost(self) -> str:
+        """The string a human should see. Never '$0.00' for an unknown."""
+        if not self.cost_is_known:
+            return "unknown"
+        return f"${self.reported_cost_usd:,.4f}"
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["cost_is_known"] = self.cost_is_known
+        data["display_cost"] = self.display_cost()
+        return data
+
+
+def _usable_number(value: Any) -> Optional[float]:
+    """A finite float, or None.
+
+    NaN and infinity are rejected rather than stored: NaN compares false
+    against every threshold and infinity is not a measurement. Both would pass
+    an `is not None` check and then poison any arithmetic downstream.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def from_envelope(envelope: Optional[Dict[str, Any]],
+                  declared_billing_mode: str = UNKNOWN) -> ResourceTelemetry:
+    """Read the resource facts out of a provider result envelope.
+
+    Absent, null, or unusable cost gives `cost_state=unknown` and a
+    `reported_cost_usd` of None -- never 0.0.
+    """
+    mode = (declared_billing_mode or UNKNOWN).strip() or UNKNOWN
+    if mode not in BILLING_MODES:
+        raise TelemetryError(
+            f"'{declared_billing_mode}' is not a billing arrangement Courier "
+            f"recognises. Declare one of {', '.join(BILLING_MODES)}; do not "
+            f"invent one, and do not leave it to be inferred.")
+    billing_state = DECLARED if mode != UNKNOWN else UNKNOWN
+
+    if not isinstance(envelope, dict):
+        return ResourceTelemetry(
+            None, UNKNOWN, UNKNOWN, mode, billing_state,
+            "No result envelope was parsed, so nothing about resource use was "
+            "observed.")
+
+    raw = envelope.get("total_cost_usd")
+    cost = _usable_number(raw)
+    if cost is None:
+        note = ("The provider reported no usable cost figure "
+                f"(total_cost_usd={raw!r}). Unknown, not zero.")
+        return ResourceTelemetry(None, UNKNOWN, UNKNOWN, mode, billing_state, note)
+
+    if cost < 0:
+        raise TelemetryError(
+            f"A reported cost of {cost} is negative, which is not a cost. "
+            f"Refusing to record it rather than clamping it to zero.")
+
+    return ResourceTelemetry(
+        cost, REPORTED, UNKNOWN, mode, billing_state,
+        "Cost is the provider's own list-price computation for this run, not "
+        "an invoice. No quota or remaining-allowance figure appears in the "
+        "result envelope of any validated Claude Code version, so quota "
+        "stays unknown.")
+
+
+def billable_total(items: Iterable[ResourceTelemetry]) -> Optional[float]:
+    """Sum reported costs, or None if any of them is unknown.
+
+    Returning None rather than a partial sum is the point. A total that
+    silently skipped the unknowns would understate spend and would look exactly
+    like a complete one.
+    """
+    total = 0.0
+    seen = False
+    for item in items:
+        if not item.cost_is_known:
+            return None
+        total += float(item.reported_cost_usd)
+        seen = True
+    return total if seen else None

@@ -1,0 +1,155 @@
+"""
+Evidence Provenance -- "Operational Evidence Integrity" mission
+(2026-07-27), delegated by ChatGPT acting as Atlas Prime after the
+database-loss incident.
+
+Direct response to a real gap the incident exposed: recover_missions.py
+could tell "this file exists" apart from "this file was created by the
+local model," but the codebase had no shared vocabulary for that
+distinction anywhere -- fields were just present, silently defaulted,
+or None. This module names the distinction once so it can be reused,
+instead of being reinvented ad hoc per field.
+
+Four states, not a binary known/unknown:
+
+- verified        -- observed directly, at the time it happened, by
+                      the pipeline itself (e.g. a human picked a
+                      category on the real submission form, right now,
+                      for this mission).
+- recovered        -- reconstructed after the fact from surviving
+                      evidence (e.g. a mission's title/goal, read
+                      straight off the literal "Mission: ..." header
+                      recover_missions.py found in a surviving artifact
+                      file). Real, but weaker than verified -- it's
+                      evidence that survived, not evidence that was
+                      directly witnessed.
+- user_confirmed   -- a human explicitly reviewed and confirmed (or
+                      corrected) a value after the fact, through a real
+                      workflow -- see the category-recovery routes in
+                      dashboard.py. Stronger than recovered, because a
+                      specific person vouched for this specific value.
+- unknown          -- genuinely not knowable from anything that
+                      survived. The honest default -- never silently
+                      upgraded to a guess just because a field needs to
+                      show something.
+
+Scoped narrowly on purpose: applied tonight only to mission_category,
+the one field this project's own evidence (the thin post-incident
+mission history) actually showed a problem for -- not spec'd out
+in advance for every field in the schema. Same "earn abstractions
+through evidence" discipline as mission_category.py itself.
+
+Deliberately owns only the label set, matching mission_category.py's
+own precedent -- no analytics, no scoring, no behavior of its own.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+# Value -> human-readable label, in display order.
+PROVENANCE_STATES = {
+    "verified": "Verified",
+    "recovered": "Recovered",
+    "user_confirmed": "User Confirmed",
+    "unknown": "Unknown",
+}
+
+# ---------------------------------------------------------------- evidence
+#
+# Mission Genesis (2026-08-05) needed a second, wider vocabulary. The four
+# states above answer "how do we know this field's value" for a stored fact
+# Atlas witnessed. Genesis produces a different kind of content -- roadmaps,
+# risks, forecasts, org proposals -- none of which Atlas observed at all.
+# Calling any of it "verified" would be the exact failure this project exists
+# to prevent, so it needs labels of its own rather than being squeezed into a
+# vocabulary built for witnessed facts.
+#
+# The rule that matters: nothing Genesis generates may ever carry a state from
+# the VERIFIED_STATES set below. `assert_not_verified()` enforces it, and
+# test_genesis.py holds it to that on every generated field.
+EVIDENCE_STATES = {
+    "user_provided": "You told Atlas this",
+    "verified_source": "Verified from a source",
+    "system_record": "Atlas's own record",
+    "human_approved": "A human approved this",
+    "model_generated": "Drafted by a model",
+    "estimated": "Estimate",
+    "inferred": "Inferred from the objective",
+    "unverified": "Not verified",
+    "disputed": "Disputed",
+}
+
+# Short forms for dense UI (chips next to a number or a claim).
+EVIDENCE_SHORT_LABELS = {
+    "user_provided": "you said",
+    "verified_source": "verified",
+    "system_record": "recorded",
+    "human_approved": "approved",
+    "model_generated": "drafted",
+    "estimated": "estimate",
+    "inferred": "inferred",
+    "unverified": "unverified",
+    "disputed": "disputed",
+}
+
+# States that assert Atlas actually observed or a human actually vouched for
+# something. Genesis output may never claim one of these.
+VERIFIED_STATES = frozenset({"verified", "verified_source", "system_record", "human_approved"})
+
+# What an unlabeled Genesis field falls back to. Deliberately the weakest
+# honest option rather than a neutral-sounding one.
+DEFAULT_EVIDENCE_STATE = "unverified"
+
+
+class UnearnedEvidenceClaim(Exception):
+    """Raised when generated content claims to be observed or approved."""
+
+
+def is_valid_evidence_state(state: Optional[str]) -> bool:
+    return state in EVIDENCE_STATES
+
+
+def evidence_state_label(state: Optional[str]) -> str:
+    return EVIDENCE_STATES.get(state, EVIDENCE_STATES[DEFAULT_EVIDENCE_STATE])
+
+
+def evidence_short_label(state: Optional[str]) -> str:
+    return EVIDENCE_SHORT_LABELS.get(state, EVIDENCE_SHORT_LABELS[DEFAULT_EVIDENCE_STATE])
+
+
+def assert_not_verified(state: Optional[str], what: str) -> str:
+    """Guard for anything Atlas generated rather than observed.
+
+    Returns the state unchanged when it is legitimately unverified, and raises
+    otherwise. Called on every field Mission Genesis produces, so the rule is
+    enforced by the code path rather than by whoever writes the next generator
+    remembering it.
+    """
+    if state in VERIFIED_STATES:
+        raise UnearnedEvidenceClaim(
+            f"{what} was generated by Atlas, so it cannot be labeled "
+            f"'{state}'. Generated content is at most an estimate or a draft "
+            f"until something actually checks it."
+        )
+    if not is_valid_evidence_state(state):
+        return DEFAULT_EVIDENCE_STATE
+    return state
+
+# The honest default for anything that was never actually witnessed or
+# confirmed -- matches DEFAULT_MISSION_CATEGORY's role in
+# mission_category.py: what every pre-existing/recovered row backfills
+# to, since none of them ever went through real-time provenance capture.
+DEFAULT_PROVENANCE_STATE = "unknown"
+
+
+def is_valid_provenance_state(state: Optional[str]) -> bool:
+    return state in PROVENANCE_STATES
+
+
+def provenance_state_label(state: Optional[str]) -> str:
+    """Falls back to the Unknown label for anything unrecognized
+    (missing, None, or a stale/invalid value) rather than raising --
+    same fail-soft precedent as mission_category_label() and
+    role_label()."""
+    return PROVENANCE_STATES.get(state, PROVENANCE_STATES[DEFAULT_PROVENANCE_STATE])

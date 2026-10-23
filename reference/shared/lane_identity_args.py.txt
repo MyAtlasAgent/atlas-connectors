@@ -1,0 +1,12 @@
+def lane_identity_args(cs, ident):
+    """Give a named lane a DURABLE session: --session-id first time, --resume after.
+    Without this the dispatcher spawned a nameless stateless process per mission,
+    so the named team could never receive work and never accumulated context."""
+    if cs not in LANES: return []
+    uid = LANES[cs]["uuid"]
+    started = f"{OPS}/state/sessions/{cs}.started"
+    # Mark the lane started only AFTER a run actually creates the session
+    # (see confirm_lane_started). Marking on intent produced --resume against a
+    # conversation that never existed: "No conversation found with session ID",
+    # rc=1 in 1 second, every dispatch (2026-09-01 regression, mine).
+    return ["--resume", uid] if os.path.isfile(started) else ["--session-id", uid]
