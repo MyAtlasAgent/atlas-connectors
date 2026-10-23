@@ -10,6 +10,7 @@ import tempfile
 from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, client_environment
 from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
 from .claude_app import ClaudeAppRoute, SURFACES
+from .converse import converse as conversation
 from . import peers as peerlib
 from . import workspaces as wslib
 from .broker import ToolBroker
@@ -158,6 +159,13 @@ def main(argv=None):
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
     send.add_argument("--config", default=None)
+    conv = commands.add_parser("converse", help="Codex and Claude talk to each other, each in its own app session")
+    conv.add_argument("prompt")
+    conv.add_argument("--rounds", type=int, default=3, help="each provider speaks once per round (1-10)")
+    conv.add_argument("--first", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
+    conv.add_argument("--workspace", help="absolute project directory (default: config, else current directory)")
+    conv.add_argument("--json", action="store_true")
+    conv.add_argument("--config", default=None)
     data = argparse.ArgumentParser(add_help=False)
     data.add_argument("--data-dir", help="override the per-user atlas-connectors data directory")
     peers = commands.add_parser("peers", parents=[data], help="detect local providers; sends nothing")
@@ -237,6 +245,22 @@ def main(argv=None):
             return 0 if not isinstance(result, dict) or result.get("status") != "error" else 2
         if args.command == "init":
             result = initialize(args.directory, args.isolated_logins, args.workspace)
+        elif args.command == "converse":
+            configuration = load_configuration(args.config)
+            routes = {name: route_for(configuration, name, mode="auto_send", workspace=args.workspace)
+                      for name in (DEFAULT_PROVIDER, "claude_app")}
+            result = conversation(routes, args.prompt, rounds=args.rounds, first=args.first)
+            if args.json:
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+            else:
+                for entry in result["transcript"]:
+                    print(f"[round {entry['round']}] {entry['speaker']}:\n{entry['text']}\n")
+                print(f"status: {result['status']}" + (f" ({result['detail']})" if result.get("detail") else ""))
+                for name, sid in result["sessions"].items():
+                    print(f"{name} session: {sid}  {result['links'].get(name, '')}")
+                if "claude_app_handoff" in result:
+                    print(f"claude desktop handoff: {result['claude_app_handoff']}")
+            return 0 if result["status"] == "completed" else 2
         elif args.command == "send":
             route = route_for(load_configuration(args.config), args.provider, mode=args.mode,
                               workspace=args.workspace, surface=args.surface)

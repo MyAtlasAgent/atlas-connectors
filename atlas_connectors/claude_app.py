@@ -125,7 +125,7 @@ class ClaudeAppRoute:
                 "link": link, "delivery": "prefilled, awaiting user send", "executed": False, "returned": False,
                 "folder_confirmation": "Claude shows an in-app dialog" if self.folder else None}
 
-    def _auto_send(self, prompt):
+    def _auto_send(self, prompt, session_id=None, handoff=True):
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_SEND_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
@@ -154,6 +154,10 @@ class ClaudeAppRoute:
             raise AdapterError("Claude subscription login required (claude auth login, paid plan); "
                                "API key/Console/unknown authentication refused; nothing sent")
         argv = [executable, "-p", "--permission-mode", permission_mode, "--output-format", "json"]
+        if session_id is not None:
+            if not isinstance(session_id, str) or not re.fullmatch(UUID, session_id):
+                raise AdapterError("Invalid Claude session id")
+            argv += ["--resume", session_id]
         # Prompt on stdin (UTF-8), so it can never be read as a flag.
         code, out, _ = self.runner(argv, cwd=workspace, env=env, stdin=prompt, timeout=self.timeout)
         if code:
@@ -173,6 +177,12 @@ class ClaudeAppRoute:
                           delivery="sent via Claude Code CLI; no session id, desktop handoff not attempted")
             return result
         resume = f"claude --resume {session}"
+        result["continued"] = session_id is not None
+        if not handoff:
+            result.update(session_id=session, resume_command=resume, status="sent", app_handoff="deferred",
+                          handoff_command=f"claude --desktop --resume {session}",
+                          delivery="sent via Claude Code CLI; desktop handoff deferred")
+            return result
         try:
             handoff = self.launcher([executable, "--desktop", "--resume", session], cwd=workspace, env=env)
         except OSError:
@@ -188,5 +198,27 @@ class ClaudeAppRoute:
                           delivery="sent via Claude Code CLI; desktop handoff failed; use resume_command")
         return result
 
-    def deliver(self, prompt):
+    def handoff(self, session_id):
+        """Open an existing session in the Claude desktop app (detached)."""
+        if not isinstance(session_id, str) or not re.fullmatch(UUID, session_id):
+            raise AdapterError("Invalid Claude session id")
+        found = self.which(self.executable)
+        if not found:
+            raise AdapterError("Claude Code CLI not found")
+        env = client_environment("claude", Path.home(), None, default_claude_login=True)
+        for key in WINDOWS_ENV + ("CLAUDE_CONFIG_DIR",):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+        try:
+            code = self.launcher([str(Path(found).resolve()), "--desktop", "--resume", session_id],
+                                 cwd=require_workspace(self.workspace), env=env)
+        except OSError:
+            return "launch_error"
+        return "ok" if code == 0 else "timeout" if code is None else f"exit {code}"
+
+    def deliver(self, prompt, session_id=None, handoff=True):
+        if session_id is not None or not handoff:
+            if self.mode != "auto_send":
+                raise AdapterError("Continuing a session requires auto_send mode")
+            return self._auto_send(prompt, session_id, handoff)
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)

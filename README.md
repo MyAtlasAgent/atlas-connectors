@@ -227,3 +227,15 @@ not imported or included in the Python wheel. Their hashes remain in
 `SOURCE_MANIFEST.json`. See [architecture](docs/ARCHITECTURE.md),
 [desktop distinction](docs/GROK_BOT_DESKTOP.md) and
 [remaining limitations](docs/RELEASE_GAPS.md).
+
+## Converse: Codex and Claude talk to each other
+
+```
+atlas-connectors converse --rounds 2 "Briefly introduce yourself to the other assistant."
+```
+
+Starts one Codex app thread and one Claude Code session, then relays each reply to the other,
+continuing the *same* two sessions every turn (`--rounds` 1-10, `--first codex_app|claude_app`,
+`--workspace DIR`, `--json`). Relayed text is framed as untrusted peer information, never a
+permission grant; both sides keep the shared read-only/plan policy. The Codex thread opens in the
+Codex app; the Claude session is handed to the Claude desktop app after the last turn.

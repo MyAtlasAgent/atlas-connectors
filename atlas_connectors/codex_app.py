@@ -246,7 +246,7 @@ class CodexAppRoute:
             raise AdapterError("Codex ChatGPT login required; API/unknown authentication refused; nothing sent")
         return executable, version[1]
 
-    def _auto_send(self, prompt):
+    def _auto_send(self, prompt, thread_id=None, open_app=True):
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_PROMPT_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
@@ -273,14 +273,20 @@ class CodexAppRoute:
             elif method == "turn/completed":
                 turn["completed"] = params.get("turn") or {}
 
-        thread_id = None
+        continuing = thread_id is not None
+        if continuing:
+            thread_link(thread_id)  # validates the id before anything runs
         try:
             try:
                 session.call(0, "initialize", {"clientInfo": CLIENT_INFO}, deadline, collect)
                 session.send({"method": "initialized", "params": {}})
-                started = session.call(1, "thread/start", {"cwd": workspace, "sandbox": sandbox,
-                                                           "approvalPolicy": "never"}, deadline, collect)
-                thread_id = (started.get("thread") or {}).get("id") or started.get("threadId")
+                if continuing:
+                    session.call(1, "thread/resume", {"threadId": thread_id, "cwd": workspace, "sandbox": sandbox,
+                                                      "approvalPolicy": "never"}, deadline, collect)
+                else:
+                    started = session.call(1, "thread/start", {"cwd": workspace, "sandbox": sandbox,
+                                                               "approvalPolicy": "never"}, deadline, collect)
+                    thread_id = (started.get("thread") or {}).get("id") or started.get("threadId")
                 if not isinstance(thread_id, str) or not re.fullmatch(UUID, thread_id):
                     raise AdapterError("codex app-server returned no thread id; nothing opened, no fallback")
                 session.call(2, "turn/start", {"threadId": thread_id,
@@ -302,14 +308,19 @@ class CodexAppRoute:
         if completion == "completed" and turn_status == "failed":
             raise AdapterError("Codex turn failed; nothing opened, no fallback")
         link = thread_link(thread_id)
-        self.opener(link)
+        if open_app:
+            self.opener(link)
         status = "sent" if completion == "completed" else "sent_completion_unknown"
         return {"status": status, "provider": self.provider, "mode": "auto_send", "sandbox": sandbox,
                 "client_version": version, "executed": True, "thread_id": thread_id, "link": link,
-                "app_thread_opened": True, "completion": completion, "turn_status": turn_status,
+                "app_thread_opened": bool(open_app), "continued": continuing, "completion": completion, "turn_status": turn_status,
                 "reply_text": finals[-1] if finals else "".join(deltas), "text_provenance": "model_claim",
                 "delivery": "sent via codex app-server; app asked to open the thread" + (
                     "" if completion == "completed" else "; reply completion not observed")}
 
-    def deliver(self, prompt):
+    def deliver(self, prompt, thread_id=None, open_app=True):
+        if thread_id is not None or not open_app:
+            if self.mode != "auto_send":
+                raise AdapterError("Continuing a thread requires auto_send mode")
+            return self._auto_send(prompt, thread_id, open_app)
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)
