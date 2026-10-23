@@ -101,6 +101,15 @@ def main():
         assert [m["id"] for m in received] == [message["id"]] and received[0]["trust"].startswith("untrusted_data")
         answer = peers.reply("grok_bot_desktop", message["id"], "Acknowledged", root=mailroot)
         assert answer["to"] == "claude_app" and answer["reply_to"] == message["id"]
+        from atlas_connectors import workspaces
+        print("Shared workspace default base (not created): <Documents>/" + workspaces.BASE_NAME + "/<name>")
+        try:
+            workspaces.create("Demo", base=temporary, root=mailroot)
+        except Exception as error:
+            assert "temp" in str(error) and not (worktree / "Demo").exists()
+        else:
+            raise AssertionError("workspace create accepted a temp dir")
+        print("Shared workspace: create inside the temp dir refused (nothing created)")
         print("Peer mailbox: send -> inbox (untrusted data) -> reply round trip in a temp dir; nothing delivered")
 
         forbidden = {"prompt_mode": "pointer", "cmd": ["fixture", "--dangerously-skip-permissions"]}

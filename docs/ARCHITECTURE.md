@@ -35,3 +35,7 @@ then config, then current directory; temp dirs refused). `prefill` (opt-in)
 opens `codex://threads/new?prompt=` or `claude://code/new?q=` and the user
 presses Send. Spawner, runner, launcher and opener are injectable; no mode falls
 back to another, to another provider or to API billing.
+
+`workspaces.py` creates shared folders (`<Documents>/Atlas Workspaces/<name>`),
+records them in the data directory's `workspaces.json` and can set one as the
+app routes' default `workspace`.

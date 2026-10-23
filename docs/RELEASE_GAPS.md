@@ -27,3 +27,5 @@ They are not invoked, installed or migrated by this package.
   0.148.0, Claude Code 2.1.302); not automated, not qualified on macOS/Linux.
 - Peer mailbox: local, same-user, unauthenticated senders; no locking beyond
   atomic rename; Windows/macOS handler detection is untested on real machines.
+- Shared workspaces: Windows known-folder lookup untested on a real machine;
+  `participants` is informational and not maintained automatically.

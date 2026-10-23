@@ -67,6 +67,26 @@ non-interactively). Exit 0 gives `sent`; otherwise `sent_handoff_failed` with
 Claude app's Code tab. Prefill opt-in: `claude://code/new?q=` /
 `claude://claude.ai/new?q=` (14,000-character limit, refused not truncated).
 
+## Shared workspace folder
+
+```sh
+atlas-connectors workspace create "Team Project" --set-default [--with-agent-instructions]
+atlas-connectors workspace list
+atlas-connectors workspace use "Team Project"
+```
+
+Creates `<Documents>/Atlas Workspaces/<name>` (Windows known Documents folder,
+including OneDrive redirection; macOS `~/Documents`; Linux `XDG_DOCUMENTS_DIR`
+or `~/Documents`), or `--base DIR/<name>`, with `README.md`,
+`.atlas-workspace.json` (name, created_at, participants), `notes/` and
+`handoffs/`. Names with separators, `..`, reserved Windows names or trailing
+dots/spaces are refused, as are temp dirs and existing folders (unless
+`--exist-ok`). `--set-default`/`use` write it as `workspace` on the codex_app and
+claude_app routes, so `send` and `mail send --deliver` work there.
+`--with-agent-instructions` writes CLAUDE.md and AGENTS.md inside the new folder
+only. The mailbox stays in the data directory; workspaces are listed in
+`workspaces.json` there.
+
 ## Local peers and mailbox
 
 Providers on one machine can notice each other and leave messages.

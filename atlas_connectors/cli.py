@@ -11,6 +11,7 @@ from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, 
 from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
 from .claude_app import ClaudeAppRoute, SURFACES
 from . import peers as peerlib
+from . import workspaces as wslib
 from .broker import ToolBroker
 from .permissions import PROVIDERS, PermissionPolicy, load_configuration
 from .protocol import INSTRUCTIONS, parse
@@ -170,6 +171,20 @@ def main(argv=None):
     mreply.add_argument("--from", dest="sender", required=True, choices=list(PROVIDERS))
     mreply.add_argument("message_id")
     mreply.add_argument("body")
+    ws = commands.add_parser("workspace", help="shared folders where providers work together")
+    wscmd = ws.add_subparsers(dest="workspace_command", required=True)
+    wcreate = wscmd.add_parser("create", parents=[data])
+    wcreate.add_argument("name")
+    wcreate.add_argument("--base", help="parent directory (default: <Documents>/Atlas Workspaces)")
+    wcreate.add_argument("--exist-ok", action="store_true")
+    wcreate.add_argument("--set-default", action="store_true")
+    wcreate.add_argument("--with-agent-instructions", action="store_true",
+                         help="write CLAUDE.md and AGENTS.md inside the new folder only")
+    wcreate.add_argument("--config", default="connector-config/connectors.json")
+    wscmd.add_parser("list", parents=[data])
+    wuse = wscmd.add_parser("use", parents=[data])
+    wuse.add_argument("name")
+    wuse.add_argument("--config", default="connector-config/connectors.json")
     for command in ("doctor", "login", "run", "smoke"):
         sub = commands.add_parser(command)
         sub.add_argument("provider", choices=[*BINARIES, "grok_bot_desktop"])
@@ -182,6 +197,19 @@ def main(argv=None):
     try:
         if args.command == "init" and args.peer_instructions:
             print(peerlib.PEER_INSTRUCTIONS, end="")
+            return 0
+        if args.command == "workspace":
+            root = Path(args.data_dir) if args.data_dir else None
+            if args.workspace_command == "create":
+                result = wslib.create(args.name, base=args.base, exist_ok=args.exist_ok,
+                                      with_agent_instructions=args.with_agent_instructions, root=root)
+                if args.set_default:
+                    result["routes_updated"] = wslib.set_default(args.config, result["path"])
+            elif args.workspace_command == "list":
+                result = wslib.registered(root)
+            else:
+                result = wslib.use(args.name, args.config, root)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         if args.command in ("peers", "register", "mail"):
             result = peer_command(args)
