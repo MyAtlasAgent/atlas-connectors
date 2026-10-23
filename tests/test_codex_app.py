@@ -167,6 +167,19 @@ class Route(unittest.TestCase):
         self.assertEqual(result["status"], "sent")
         self.assertEqual(result["thread_id"], TID)
 
+    def test_keep_alive_continues_same_thread_in_one_server(self):
+        server = FakeAppServer()
+        route = self.route(server)
+        first = route.deliver("one", open_app=False, keep_alive=True)
+        self.assertFalse(server.terminated)
+        second = route.deliver("two", thread_id=first["thread_id"], open_app=False, keep_alive=True)
+        route.close()
+        self.assertTrue(server.terminated)
+        methods = [m.get("method") for m in server.sent if "method" in m]
+        self.assertEqual(methods, ["initialize", "initialized", "thread/start", "turn/start", "turn/start"])
+        self.assertEqual(second["thread_id"], TID)
+        self.assertEqual(self.opened, [])
+
     def test_reply_is_decoded_as_utf8_including_em_dash(self):
         result = self.route(FakeAppServer(reply="Hi — Codex here ✓")).deliver("hello")
         self.assertEqual(result["reply_text"], "Hi — Codex here ✓")

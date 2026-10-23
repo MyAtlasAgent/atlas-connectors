@@ -208,6 +208,10 @@ class AppServerSession:
                 pass
 
 
+class _Accepted(Exception):
+    pass
+
+
 class CodexAppRoute:
     provider = DEFAULT_PROVIDER
 
@@ -246,20 +250,33 @@ class CodexAppRoute:
             raise AdapterError("Codex ChatGPT login required; API/unknown authentication refused; nothing sent")
         return executable, version[1]
 
-    def _auto_send(self, prompt, thread_id=None, open_app=True):
+    def close(self):
+        """Stop a kept-alive app-server (see keep_alive); safe to call repeatedly."""
+        live, self._live = getattr(self, "_live", None), None
+        if live:
+            live["session"].close()
+
+    def _auto_send(self, prompt, thread_id=None, open_app=True, keep_alive=False):
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_PROMPT_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
         workspace = require_workspace(self.workspace)
         sandbox = sandbox_for(self.policy)
         env = client_env(self.codex_home)  # refuses API key/base URL overrides
-        executable, version = self._preflight(env, workspace)
+        live = getattr(self, "_live", None)
+        reuse = live is not None and thread_id is not None and live["thread_id"] == thread_id
+        if reuse:
+            executable, version, session = live["executable"], live["version"], live["session"]
+        else:
+            self.close()
+            executable, version = self._preflight(env, workspace)
         deadline = time.monotonic() + self.timeout
-        try:
-            process = self.spawner([executable, "app-server"], cwd=workspace, env=env)
-        except OSError:
-            raise AdapterError("codex app-server could not start; nothing sent, no fallback") from None
-        session = AppServerSession(process)
+        if not reuse:
+            try:
+                process = self.spawner([executable, "app-server"], cwd=workspace, env=env)
+            except OSError:
+                raise AdapterError("codex app-server could not start; nothing sent, no fallback") from None
+            session = AppServerSession(process)
         deltas, finals, turn = [], [], {}
 
         def collect(message):
@@ -276,8 +293,14 @@ class CodexAppRoute:
         continuing = thread_id is not None
         if continuing:
             thread_link(thread_id)  # validates the id before anything runs
+        keep = False
         try:
             try:
+                if reuse:
+                    live["ident"] += 1
+                    session.call(live["ident"], "turn/start", {"threadId": thread_id, "input": [
+                        {"type": "text", "text": prompt}]}, deadline, collect)
+                    raise _Accepted
                 session.call(0, "initialize", {"clientInfo": CLIENT_INFO}, deadline, collect)
                 session.send({"method": "initialized", "params": {}})
                 if continuing:
@@ -291,6 +314,8 @@ class CodexAppRoute:
                     raise AdapterError("codex app-server returned no thread id; nothing opened, no fallback")
                 session.call(2, "turn/start", {"threadId": thread_id,
                                                "input": [{"type": "text", "text": prompt}]}, deadline, collect)
+            except _Accepted:
+                pass
             except (TimeoutError, EOFError, OSError):
                 raise AdapterError("codex app-server did not accept the message; nothing opened, no fallback") from None
             # The turn is accepted: the message is in the thread. Wait for completion.
@@ -302,8 +327,16 @@ class CodexAppRoute:
                 completion = "timeout"
             except EOFError:
                 completion = "server_exited"
+            keep = keep_alive and completion == "completed"
         finally:
-            session.close()
+            if keep:
+                if not reuse:
+                    self._live = {"session": session, "thread_id": thread_id, "executable": executable,
+                                  "version": version, "ident": 2}
+            else:
+                if reuse:
+                    self._live = None
+                session.close()
         turn_status = turn.get("completed", {}).get("status") if completion == "completed" else None
         if completion == "completed" and turn_status == "failed":
             raise AdapterError("Codex turn failed; nothing opened, no fallback")
@@ -318,9 +351,11 @@ class CodexAppRoute:
                 "delivery": "sent via codex app-server; app asked to open the thread" + (
                     "" if completion == "completed" else "; reply completion not observed")}
 
-    def deliver(self, prompt, thread_id=None, open_app=True):
-        if thread_id is not None or not open_app:
+    def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False):
+        """keep_alive keeps the app-server running so the next deliver(thread_id=...) continues the same
+        thread in-process (the Codex app holds a writer lock once it opens a thread, so open it last)."""
+        if thread_id is not None or not open_app or keep_alive:
             if self.mode != "auto_send":
                 raise AdapterError("Continuing a thread requires auto_send mode")
-            return self._auto_send(prompt, thread_id, open_app)
+            return self._auto_send(prompt, thread_id, open_app, keep_alive)
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)

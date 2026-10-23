@@ -4,8 +4,9 @@ Each provider gets ONE persistent session: the first message starts it, every
 later message continues the same Codex thread (``thread/resume`` + ``turn/start``)
 or Claude session (``claude -p --resume <id>``). Each reply is wrapped in a
 framing that marks it as untrusted peer information, never a permission grant.
-Both routes keep the shared permission policy (read-only/plan by default). The
-Codex thread is opened in the app after its first turn and again at the end;
+Both routes keep the shared permission policy (read-only/plan by default). One
+Codex app-server stays alive for the whole conversation (the Codex app takes a
+writer lock on threads it opens), and the thread is opened in the app at the end;
 the Claude session is handed to the desktop app once, after the last turn, so
 the ``--desktop`` handoff never races later ``-p --resume`` calls.
 """
@@ -54,7 +55,7 @@ def converse(routes, prompt, *, rounds=3, first="codex_app"):
                     message = opener(speaker, previous, "").rstrip() + "\n\n" + message
             route = routes[speaker]
             if speaker == "codex_app":
-                reply = route.deliver(message, thread_id=sessions[speaker], open_app=sessions[speaker] is None)
+                reply = route.deliver(message, thread_id=sessions[speaker], open_app=False, keep_alive=True)
                 sessions[speaker] = reply.get("thread_id")
                 links[speaker] = reply.get("link")
             else:
@@ -70,6 +71,10 @@ def converse(routes, prompt, *, rounds=3, first="codex_app"):
             previous = speaker
     except AdapterError as error:
         result.update(status="stopped", detail=str(error))
+    finally:
+        close = getattr(routes["codex_app"], "close", None)
+        if close:
+            close()
     if sessions["claude_app"]:
         result["claude_app_handoff"] = routes["claude_app"].handoff(sessions["claude_app"])
         links["claude_app"] = f"claude --desktop --resume {sessions['claude_app']}"

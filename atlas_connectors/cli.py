@@ -251,7 +251,7 @@ def main(argv=None):
                       for name in (DEFAULT_PROVIDER, "claude_app")}
             result = conversation(routes, args.prompt, rounds=args.rounds, first=args.first)
             if args.json:
-                print(json.dumps(result, indent=2, ensure_ascii=False))
+                print(json.dumps(result, indent=2))
             else:
                 for entry in result["transcript"]:
                     print(f"[round {entry['round']}] {entry['speaker']}:\n{entry['text']}\n")

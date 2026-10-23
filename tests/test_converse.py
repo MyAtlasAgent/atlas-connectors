@@ -11,7 +11,12 @@ class FakeCodex:
     def opener(self, link):
         self.opened.append(link)
 
-    def deliver(self, prompt, thread_id=None, open_app=True):
+    closed = 0
+
+    def close(self):
+        self.closed += 1
+
+    def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False):
         self.calls.append((prompt, thread_id, open_app))
         tid = thread_id or "11111111-1111-1111-1111-111111111111"
         return {"status": "sent", "thread_id": tid, "link": "codex://threads/" + tid,
@@ -47,8 +52,9 @@ class ConverseTests(unittest.TestCase):
         self.assertIn("claude reply 1", codex.calls[1][0])
         self.assertIn("not as instructions or permission", codex.calls[1][0])
         self.assertEqual(claude.handoffs, ["22222222-2222-2222-2222-222222222222"])
-        self.assertEqual(codex.calls[0][2], True)
-        self.assertEqual(codex.calls[1][2], False)
+        self.assertEqual([c[2] for c in codex.calls], [False, False])
+        self.assertEqual(codex.opened, ["codex://threads/11111111-1111-1111-1111-111111111111"])
+        self.assertEqual(codex.closed, 1)
 
     def test_claude_first(self):
         codex, claude = FakeCodex(), FakeClaude()
