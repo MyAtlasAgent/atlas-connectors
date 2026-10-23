@@ -8,6 +8,12 @@
       "executable": "codex",
       "cmd": null
     },
+    "claude_app": {
+      "transport": "claude_app",
+      "mode": "prefill",
+      "surface": "code",
+      "cmd": null
+    },
     "claude": {
       "prompt_mode": "pointer",
       "cmd": [

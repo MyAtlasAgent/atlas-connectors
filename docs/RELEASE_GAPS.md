@@ -11,6 +11,8 @@ Remaining:
 - codex_app: CLI-sent sessions appearing in the desktop app's thread list is
   verified only by the `codex://threads/<id>` link opening them; the accepted
   Codex version list must include the user's client for auto_send.
+- claude_app: no auto-send (Claude links never auto-submit); cowork surface,
+  `file` parameter and `claude://claude.ai/chat/{id}` resume are not implemented.
 - Windows support (codex_app runs there; broker enforcement does not); directory-descriptor enforcement is POSIX only.
 - Qualification of additional client versions and OS combinations.
 - First-time new-account onboarding on a clean workstation. Existing logins with

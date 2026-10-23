@@ -58,7 +58,7 @@ def main():
             assert configuration.permissions_for(provider) is configuration.policy
             assert all(configuration.permissions_for(provider).preference(capability) == "ask"
                        for capability in CAPABILITIES)
-        print("All five providers inherit the same user-selected permissions (example: ask)")
+        print("All six providers inherit the same user-selected permissions (example: ask)")
         for name in ("claude", "codex", "supergrok_cli"):
             command = context["build_cmd"](routes[name], str(packet), temporary, callsign="DEMO")
             assert command and "{prompt}" not in " ".join(command)
@@ -79,6 +79,11 @@ def main():
               + link.replace(quote(str(Path(temporary).resolve()), safe=""), "<TEMP>"))
         print("codex_app auto_send would open after CLI send (not opened): "
               + thread_link("00000000-0000-0000-0000-000000000000"))
+        from atlas_connectors.claude_app import ClaudeAppRoute
+        claude = ClaudeAppRoute(configuration.permissions_for("claude_app"), surface=routes["claude_app"]["surface"],
+                                opener=opened.append)
+        print("claude_app (prefill only, user presses Send) link preview (not opened): "
+              + claude.preview("Say hello & name your model?"))
         assert opened == []
 
         forbidden = {"prompt_mode": "pointer", "cmd": ["fixture", "--dangerously-skip-permissions"]}

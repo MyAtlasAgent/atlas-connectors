@@ -6,6 +6,11 @@
       "mode": "auto_send",
       "executable": "codex"
     },
+    "claude_app": {
+      "transport": "claude_app",
+      "mode": "prefill",
+      "surface": "code"
+    },
     "claude": {
       "transport": "subscription_cli",
       "executable": "claude"

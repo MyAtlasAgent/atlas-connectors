@@ -47,6 +47,20 @@ and nothing is opened. CLI failure opens nothing and never falls back.
 auto-submits, so the result is `prefilled_awaiting_user_send`. Set
 `"mode": "prefill"` on the `codex_app` route to make that the default.
 
+### Claude desktop app (prefill only)
+
+```sh
+atlas-connectors send 'Say hello' --provider claude_app                 # claude://code/new?q=
+atlas-connectors send 'Say hello' --provider claude_app --surface chat  # claude://claude.ai/new?q=
+```
+
+Claude Code and the Claude app require a paid Claude plan; there is no API
+billing fallback. Claude Desktop (1.1.2321+) links never auto-submit, so
+`claude_app` is prefill-only (`prefilled_awaiting_user_send`); `--mode auto_send`
+is refused rather than falling back to the claude CLI. Prompts over 14,000
+characters are refused instead of silently truncated. `--workspace` sets the
+code surface's absolute `folder`, which Claude confirms with an in-app dialog.
+
 ## Install and connect
 
 ```sh

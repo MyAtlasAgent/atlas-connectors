@@ -64,3 +64,7 @@ Official references: [Claude controls](https://code.claude.com/docs/en/cli-refer
 web search only when `network=allow`; `read_files=deny` refuses. `ask` cannot be
 asked inside `codex exec`, so it maps to the narrower setting. Effects here are
 Codex-native, not brokered. `prefill` performs no effects until the user sends.
+
+`claude_app` inherits the same shared policy and performs no effects; it only
+prefills the Claude desktop composer. A `folder` always triggers Claude's own
+confirmation dialog. Only `claude://` URLs are handed to the OS.

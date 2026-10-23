@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-PROVIDERS = ("codex_app", "claude", "codex", "supergrok_cli", "grok_bot_desktop")
+PROVIDERS = ("codex_app", "claude_app", "claude", "codex", "supergrok_cli", "grok_bot_desktop")
 CAPABILITIES = (
     "read_files", "write_files", "run_commands", "network", "git_commit",
     "git_push", "connected_tools", "read_credentials", "merge", "install",
@@ -122,10 +122,13 @@ def load_configuration(path):
         route = _object(raw_route, name)
         if set(route) - {"prompt_mode", "cmd", "transport", "automatic_connector",
                          "executable", "model", "auth_directory", "timeout",
-                         "mode", "workspace"}:
+                         "mode", "workspace", "surface", "folder"}:
             raise ConfigurationError(f"{name}: provider-specific permission/configuration override refused")
-        if (name == "codex_app") != (route.get("transport") == "codex_app"):
-            raise ConfigurationError(f"{name}: codex_app transport is only valid for the codex_app provider")
+        for app in ("codex_app", "claude_app"):
+            if (name == app) != (route.get("transport") == app):
+                raise ConfigurationError(f"{name}: {app} transport is only valid for the {app} provider")
+        if name == "claude_app" and route.get("mode", "prefill") != "prefill":
+            raise ConfigurationError("claude_app is prefill-only; auto_send refused")
         if "mode" in route and route["mode"] not in ("auto_send", "prefill"):
             raise ConfigurationError(f"{name}: mode must be auto_send or prefill")
         cmd = route.get("cmd")
