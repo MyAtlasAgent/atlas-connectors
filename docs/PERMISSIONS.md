@@ -11,9 +11,52 @@ and refuse the affected action. It must not silently broaden access or quietly
 restrict a build-capable provider to review-only while another provider can edit.
 Mission grants and explicit reviewer restrictions still apply equally to all.
 
-**Current finding: parity is not implemented or demonstrated.** This document
-records the check and the required behavior; it does not install a new runtime
-policy. The shipped references remain historical source snapshots.
+**Configuration standard implemented:** all routes now inherit one user-selected
+policy through `atlas_connectors/permissions.py`. Provider-specific policy fields
+and recognized native policy flags in route configuration are rejected. The
+original installed routes and reading copies remain historical evidence;
+equivalent live enforcement is still unqualified.
+
+## Choose permissions once
+
+Edit `examples/permissions.json`. The initial shared default is `ask`, with no
+capability overrides. For example, a user can choose:
+
+```json
+{
+  "version": 1,
+  "default": "ask",
+  "capabilities": {
+    "read_files": "allow",
+    "write_files": "allow",
+    "network": "deny"
+  }
+}
+```
+
+Those choices apply equally to Claude, Codex, SuperGrok CLI and Grok Bot desktop.
+Other supported capabilities are `run_commands`, `git_commit`, `git_push`,
+`connected_tools`, `read_credentials`, `merge` and `install`. Each accepts only
+`allow`, `ask` or `deny`; omitted capabilities inherit the shared default.
+`allow` expresses user preference, not an Atlas grant or provider-enforcement
+receipt. Actual execution still needs applicable scope and authority.
+
+Load the configuration from the repository root:
+
+```python
+from atlas_connectors.permissions import load_configuration
+
+config = load_configuration("examples/operators.example.json")
+assert config.permissions_for("claude") is config.permissions_for("codex")
+print(config.permissions_for("codex").preference("write_files"))
+```
+
+The same immutable policy and fingerprint apply to every configured route.
+Changing the user file takes effect on the next configuration load; loaded
+snapshots do not mutate running work. No provider is launched by this module.
+The policy reference must resolve inside the configuration directory. Native
+CLI flags are translated only by a future live adapter, rather than supplied
+as per-provider overrides in this configuration.
 
 ## What was inspected
 
@@ -39,9 +82,12 @@ complete effective policy on any live session.
 | Grok build CLI | Separate allow rules for worktree edits, tests and commits | Model push and GitHub CLI denied; separate owner-operated publication step | No explicit sandbox profile in the inspected invocation; wrapper itself disclaims structural egress prevention |
 | Grok Bot desktop | Manual-delivery route; no owned automatic adapter extracted | A packet cannot establish app-enforced permission equality | All app permission, sandbox, network and provider identity enforcement |
 
-The package's minimal argv examples also differ: Claude omits an explicit mode,
-Codex selects read-only and Grok delegates to a wrapper. They are transport-shape
-examples, **not equivalent permission presets or recommended live configuration**.
+The earlier package hard-coded Codex read-only in its example. That flag is now
+removed: all example routes reference the same user policy. These argv templates
+are **offline transport examples, not launch-ready commands**. Removing a native
+flag does not enforce the shared policy; forwarding these templates to a real
+CLI without a qualified translator could inherit that client's defaults. The
+historical Grok wrapper also retains its old rules. No live launcher is shipped.
 
 ## Documentation corrections and enforcement limits
 
@@ -72,9 +118,10 @@ write, secret read or network effect. No such bypass was executed in this check.
 
 ## Required common preference contract
 
-One user-selected policy should state filesystem read/write roots, command/test
-execution, Git commit/push scope, network destinations, connected tools,
-credential exposure, approval behavior and expiry/revocation. Each adapter needs
+The shared user preference now selects capability-level allow/ask/deny choices.
+Its future enforcement contract must additionally state filesystem read/write
+roots, command/test scope, Git commit/push scope, network destinations, connected
+tools, credential exposure and expiry/revocation. Each adapter needs
 to translate that same policy into its native enforcement and record the actual
 enforced result. Missing enforcement must stay explicit.
 
@@ -86,6 +133,7 @@ expired authority. Include shell/interpreter paths and connected tools, not just
 the vendors' direct Edit/Write tools. Grok Bot desktop stays manual/unqualified
 until its enforcement can be demonstrated.
 
-The existing live routes were inspected only. A parity implementation and rollout
-remain separate work; the source preview must not claim equal live permissions
-until those controls and conformance observations exist.
+The existing live routes were inspected only. Shared configuration parity is now
+tested in this repository; native enforcement and live rollout remain separate.
+The source preview must not claim equal live permissions until those controls
+and conformance observations exist.

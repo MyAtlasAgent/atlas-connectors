@@ -21,9 +21,13 @@ python3 -B examples/offline_walkthrough.py
    [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json).
 4. Read [the release gaps](docs/RELEASE_GAPS.md) before integrating it.
 
-**Permissions:** the user requires equivalent permissions across providers for
-equivalent work. The current routes and argv examples do not yet enforce that
-parity. See the [permission check and common-policy requirements](docs/PERMISSIONS.md).
+**Permissions are a shared user preference.** Edit
+[`examples/permissions.json`](examples/permissions.json) once for all providers.
+Choose `allow`, `ask` or `deny` per capability; unspecified capabilities inherit
+the user's shared default (`ask` in the example). Provider-specific permission
+overrides are rejected by the configuration loader. See [setup and enforcement
+limits](docs/PERMISSIONS.md). Live provider enforcement is not implemented in
+this source preview.
 
 The walkthrough runs selected existing command-building and return-validation
 functions against synthetic fixtures. It starts no provider, reads no provider
@@ -35,7 +39,7 @@ the extracted code, not an end-to-end Atlas execution or provider qualification.
 | Route | Included material | Current boundary |
 | --- | --- | --- |
 | Claude Code | Command builder, durable-session helpers, Courier endpoint, permission and telemetry code | Courier and the legacy dispatcher are distinct existing paths; not newly unified here |
-| Codex | Shared command builder and illustrative read-only command configuration | Uses stdout/output-file return transport; no independent Codex SDK extracted |
+| Codex | Shared command builder and user-controlled permission configuration | Uses stdout/output-file return transport; no independent Codex SDK extracted |
 | SuperGrok CLI | Existing launcher and return validator | Launcher depends on Atlas registration, permission, custody and return-ingestion services |
 | Grok Bot desktop | Separate [manual handoff contract](docs/GROK_BOT_DESKTOP.md) and synthetic packet | An Atlas-owned automatic desktop connector was not found in the inspected sources |
 

@@ -36,9 +36,24 @@ Its imports depend on permission_policy, telemetry and provenance; related sourc
 is included for reading. Ledger, scheduling and effect authority stay outside.
 
 The Codex route uses the shared dispatcher. The example config illustrates its
-read-only CLI/output-file shape, without copying a local executable or account
-configuration. Generic command assembly is not proof of Codex session handling,
+CLI/output-file shape, without a provider-specific read-only default or a copied
+local executable/account configuration. Generic command assembly is not proof of Codex session handling,
 provider authentication, or current CLI compatibility.
+
+## Shared user permission configuration
+
+`atlas_connectors/permissions.py` loads one user policy from
+`examples/permissions.json` and gives the identical immutable policy to every
+configured provider. The configuration loader rejects per-provider policy fields
+and recognized native permission/configuration flags in route templates. Users
+choose each capability's `allow`, `ask` or `deny` preference; the provider label
+does not change it. This new configuration layer is separate from the preserved
+legacy reading copies under `reference/`.
+
+The module is a preference resolver. It performs no provider execution,
+authentication, grant issuance or action authorization. A future live adapter
+must translate and enforce the shared preference, with explicit failure when
+the provider cannot enforce the requested boundary.
 
 The Grok launcher adds launch registration, isolated HOME handling, a subscription
 route guard, permissions, return retrieval and checkout checks. The return

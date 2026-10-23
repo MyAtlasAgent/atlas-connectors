@@ -20,9 +20,10 @@ presenting it as a portable live connector library:
   user's authorized account. No provider command or subscription probe was run
   while preparing this package. Never silently switch to billable API access.
 - Codex needs an independently portable endpoint beyond generic command assembly.
-- Implement the common user permission preference across adapters and prove
-  equivalent enforcement. Existing Claude, Codex, Grok review and Grok build
-  routes differ; [the permission check](PERMISSIONS.md) records the gaps.
+- Shared user permission selection and configuration parity are implemented.
+  Translate that policy into each live adapter and prove equivalent enforcement.
+  Historical installed routes still differ; [the permission guide](PERMISSIONS.md)
+  separates the new configuration standard from the remaining enforcement gaps.
 - Grok Bot desktop has a documented manual path, not an extracted automatic
   connector. Keep it experimental/manual unless real owned source is supplied.
 - Preserve one owner for custody/lifecycle. A portable adapter must not inherit
@@ -31,5 +32,6 @@ presenting it as a portable live connector library:
   Principal selected MIT and authorized the separate public repository;
   the license file is included.
 
-The existing DOM-451/580 implementation pause is not lifted by preparing this
-read-only extraction. Any runtime implementation or cutover remains separate.
+The Principal authorized the portable shared-preference implementation in this
+repository. Installation into Atlas, live dispatcher changes and connector
+cutover remain separate from this source preview.

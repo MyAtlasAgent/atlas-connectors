@@ -13,6 +13,8 @@ import tempfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from atlas_connectors.permissions import CAPABILITIES, load_configuration
 
 
 def no_external_execution(event, args):
@@ -49,7 +51,13 @@ def main():
             "write_route_receipt": lambda *args: receipts.append("DEMO_MEMORY_ONLY"),
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "existing_build_cmd", "exec"), context)
-        routes = json.loads((ROOT / "examples/operators.example.json").read_text())
+        configuration = load_configuration(ROOT / "examples/operators.example.json")
+        routes = configuration.providers
+        for provider in routes:
+            assert configuration.permissions_for(provider) is configuration.policy
+            assert all(configuration.permissions_for(provider).preference(capability) == "ask"
+                       for capability in CAPABILITIES)
+        print("All four providers inherit the same user-selected permissions (example: ask)")
         for name in ("claude", "codex", "supergrok_cli"):
             command = context["build_cmd"](routes[name], str(packet), temporary, callsign="DEMO")
             assert command and "{prompt}" not in " ".join(command)

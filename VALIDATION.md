@@ -19,3 +19,16 @@ Observed locally while preparing the extraction:
 No provider client, login, subscription probe, network request, live mission,
 runtime configuration, installation or public GitHub publication was exercised.
 No independent acceptance, live compatibility or production readiness is claimed.
+
+## Shared user preference update
+
+- `python3 -B -m unittest discover -s tests -v`: 13 tests, all passed.
+- All four routes resolve to the identical immutable policy object; user changes
+  to allow/ask/deny apply across all routes, including Codex.
+- Negative cases refuse provider policy overrides, recognized native policy
+  flags, missing policy selection, invalid capabilities/choices, unknown routes
+  and policy paths escaping the configuration directory (including symlinks).
+- The offline walkthrough passes using the shared example policy. Its nine
+  historical reference hashes remain unchanged.
+- These checks validate configuration parity. No provider-enforcement or live
+  permission change is claimed.
