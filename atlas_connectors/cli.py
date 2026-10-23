@@ -145,6 +145,11 @@ def smoke(adapter):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # Windows consoles/pipes default to a legacy code page
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(prog="atlas-connectors")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
