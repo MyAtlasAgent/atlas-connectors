@@ -188,7 +188,9 @@ def main(argv=None):
         conv.add_argument("--config", default=None)
         conv.add_argument("--data-dir", default=None)
     sess = commands.add_parser("sessions", help="list or reset saved app sessions")
-    sess.add_argument("action", nargs="?", choices=["list", "reset"], default="list")
+    sess.add_argument("action", nargs="?", choices=["list", "reset", "open"], default="list")
+    sess.add_argument("--config", default=None)
+    sess.add_argument("--workspace", default=None)
     sess.add_argument("provider", nargs="?", choices=list(sessionlib.PROVIDERS))
     sess.add_argument("--data-dir", default=None)
     data = argparse.ArgumentParser(add_help=False)
@@ -271,8 +273,25 @@ def main(argv=None):
         if args.command == "init":
             result = initialize(args.directory, args.isolated_logins, args.workspace)
         elif args.command == "sessions":
-            result = (sessionlib.reset(args.provider, args.data_dir) if args.action == "reset"
-                      else sessionlib.listing(args.data_dir))
+            if args.action == "open":
+                configuration = load_configuration(args.config)
+                result = {}
+                for name in ([args.provider] if args.provider else list(sessionlib.PROVIDERS)):
+                    route = route_for(configuration, name, mode="auto_send", workspace=args.workspace)
+                    workspace = require_workspace(route.workspace)
+                    sid = sessionlib.get(name, workspace, args.data_dir)
+                    if not sid:
+                        result[name] = {"status": "no_saved_session", "workspace": workspace}
+                    elif name == "codex_app":
+                        route.opener(f"codex://threads/{sid}")
+                        result[name] = {"status": "opened", "session_id": sid, "link": f"codex://threads/{sid}",
+                                        "note": "the Codex app now holds this thread; further sends need an app restart or --new-session"}
+                    else:
+                        result[name] = {"status": route.handoff(sid), "session_id": sid, "workspace": workspace,
+                                        "where": "Claude desktop app > Code tab, folder " + Path(workspace).name}
+            else:
+                result = (sessionlib.reset(args.provider, args.data_dir) if args.action == "reset"
+                          else sessionlib.listing(args.data_dir))
             print(json.dumps(result, indent=2))
             return 0
         elif args.command in ("converse", "solve"):

@@ -276,3 +276,13 @@ detached `claude --desktop --resume <id>`). `--no-open` skips opening, and `--co
 pair instead (see the Codex lock limitation above). `send --provider claude_app` opens the continued session in
 the Claude app by default. `send --provider codex_app` prints the thread link and a hint; add `--open` to open
 it in the app.
+
+`atlas-connectors sessions open [codex_app|claude_app]` reopens the saved sessions in the desktop apps. Claude
+sessions show up in the Claude app's **Code** tab under the workspace folder, with no custom title.
+
+**Billing guard per provider:** each route refuses only the overrides that could redirect its own billing. Codex
+routes ignore `ANTHROPIC_*` and `CLAUDE_CODE_*`, so Claude can call `send --provider codex_app` from inside its
+desktop Code session. Claude routes accept a loopback `ANTHROPIC_BASE_URL` (the desktop app's local proxy) as long
+as no API key, token or cloud flag is set. In that case the variable is dropped from the child's environment, and
+the subscription login is checked with `claude auth status`. Any other override is refused with a clear error.
+Child processes always get an allowlisted environment.
