@@ -71,13 +71,23 @@ def handler_registered(scheme, platform=None, runner=None):
     if platform == "win32":
         import winreg  # noqa: PLC0415 - Windows only
         for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_CLASSES_ROOT):
-            path = rf"Software\Classes\{scheme}\shell\open\command" if hive == winreg.HKEY_CURRENT_USER \
-                else rf"{scheme}\shell\open\command"
+            path = rf"Software\Classes\{scheme}" if hive == winreg.HKEY_CURRENT_USER else scheme
             try:
-                winreg.CloseKey(winreg.OpenKey(hive, path))
-                return True
+                key = winreg.OpenKey(hive, path)
             except OSError:
                 continue
+            try:
+                # Packaged (MSIX) apps register "URL Protocol" without shell\open\command.
+                winreg.QueryValueEx(key, "URL Protocol")
+                return True
+            except OSError:
+                try:
+                    winreg.CloseKey(winreg.OpenKey(key, r"shell\open\command"))
+                    return True
+                except OSError:
+                    continue
+            finally:
+                winreg.CloseKey(key)
         return False
     if platform == "darwin":
         return any((root / APP_BUNDLES[scheme]).is_dir() for root in (Path("/Applications"), Path.home() / "Applications"))

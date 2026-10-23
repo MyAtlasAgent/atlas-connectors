@@ -18,6 +18,15 @@ from .protocol import INSTRUCTIONS, parse
 from .runner import run
 
 
+def default_config_path():
+    """./connector-config if present (repo checkouts), else the per-user data folder."""
+    local = Path("connector-config") / "connectors.json"
+    if local.exists():
+        return local
+    from .peers import data_dir  # noqa: PLC0415
+    return data_dir() / "config" / "connectors.json"
+
+
 def initialize(directory, isolated=False, workspace=None):
     root = Path(directory).resolve()
     destinations = [root / "connectors.json", root / "permissions.json"]
@@ -136,7 +145,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="atlas-connectors")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
-    init.add_argument("directory", nargs="?", default="connector-config")
+    init.add_argument("directory", nargs="?", default=None)
     init.add_argument("--isolated-logins", action="store_true")
     init.add_argument("--peer-instructions", action="store_true",
                       help="print a CLAUDE.md/AGENTS.md snippet about peers and mail; writes nothing")
@@ -148,7 +157,7 @@ def main(argv=None):
     send.add_argument("--workspace", help="absolute project directory; overrides config `workspace`, else the current directory")
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
-    send.add_argument("--config", default="connector-config/connectors.json")
+    send.add_argument("--config", default=None)
     data = argparse.ArgumentParser(add_help=False)
     data.add_argument("--data-dir", help="override the per-user atlas-connectors data directory")
     peers = commands.add_parser("peers", parents=[data], help="detect local providers; sends nothing")
@@ -162,7 +171,7 @@ def main(argv=None):
     msend.add_argument("--to", dest="recipient", required=True, choices=list(PROVIDERS))
     msend.add_argument("body")
     msend.add_argument("--deliver", action="store_true", help="also auto_send into codex_app/claude_app")
-    msend.add_argument("--config", default="connector-config/connectors.json")
+    msend.add_argument("--config", default=None)
     msend.add_argument("--workspace")
     minbox = mailcmd.add_parser("inbox", parents=[data])
     minbox.add_argument("provider", choices=list(PROVIDERS))
@@ -180,20 +189,24 @@ def main(argv=None):
     wcreate.add_argument("--set-default", action="store_true")
     wcreate.add_argument("--with-agent-instructions", action="store_true",
                          help="write CLAUDE.md and AGENTS.md inside the new folder only")
-    wcreate.add_argument("--config", default="connector-config/connectors.json")
+    wcreate.add_argument("--config", default=None)
     wscmd.add_parser("list", parents=[data])
     wuse = wscmd.add_parser("use", parents=[data])
     wuse.add_argument("name")
-    wuse.add_argument("--config", default="connector-config/connectors.json")
+    wuse.add_argument("--config", default=None)
     for command in ("doctor", "login", "run", "smoke"):
         sub = commands.add_parser(command)
         sub.add_argument("provider", choices=[*BINARIES, "grok_bot_desktop"])
-        sub.add_argument("--config", default="connector-config/connectors.json")
+        sub.add_argument("--config", default=None)
         if command == "run":
             sub.add_argument("prompt")
             sub.add_argument("--workspace", required=True)
             sub.add_argument("--max-turns", type=int, default=8)
     args = parser.parse_args(argv)
+    if getattr(args, "config", "unset") is None:
+        args.config = str(default_config_path())
+    if args.command == "init" and args.directory is None:
+        args.directory = str(default_config_path().parent)
     try:
         if args.command == "init" and args.peer_instructions:
             print(peerlib.PEER_INSTRUCTIONS, end="")
