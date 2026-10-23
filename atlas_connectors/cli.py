@@ -16,16 +16,24 @@ from .protocol import INSTRUCTIONS, parse
 from .runner import run
 
 
-def initialize(directory, isolated=False):
+def initialize(directory, isolated=False, workspace=None):
     root = Path(directory).resolve()
     destinations = [root / "connectors.json", root / "permissions.json"]
     if any(path.exists() for path in destinations):
         raise ValueError("Configuration already exists; no files overwritten")
+    if workspace is not None:
+        workspace = Path(workspace)
+        if not workspace.is_absolute() or not workspace.is_dir():
+            raise ValueError("--workspace must be an absolute existing directory")
+        workspace = str(workspace.resolve())
     root.mkdir(parents=True, exist_ok=True)
     # New users default to the Codex desktop app on their ChatGPT login.
     providers = {DEFAULT_PROVIDER: {"transport": "codex_app", "mode": DEFAULT_MODE, "executable": "codex"},
                  "claude_app": {"transport": "claude_app", "mode": "auto_send", "surface": "code",
                                 "executable": "claude"}}
+    if workspace is not None:
+        for name in (DEFAULT_PROVIDER, "claude_app"):
+            providers[name]["workspace"] = workspace
     for name, binary in BINARIES.items():
         route = {"transport": "subscription_cli", "executable": binary}
         if isolated:
@@ -55,7 +63,8 @@ def route_for(configuration, provider=DEFAULT_PROVIDER, *, mode=None, workspace=
     if route.get("transport") == "claude_app":
         return ClaudeAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", "auto_send"),
                               surface=surface or route.get("surface", "code"),
-                              folder=workspace or route.get("folder"), opener=opener,
+                              folder=(workspace or route.get("folder")) if (mode or route.get("mode")) == "prefill" else route.get("folder"),
+                              workspace=workspace or route.get("workspace"), opener=opener,
                               executable=route.get("executable", "claude"),
                               timeout=route.get("timeout", 300), runner=runner)
     if route.get("transport") != "codex_app":
@@ -103,11 +112,12 @@ def main(argv=None):
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
     init.add_argument("directory", nargs="?", default="connector-config")
     init.add_argument("--isolated-logins", action="store_true")
+    init.add_argument("--workspace", help="absolute project directory used by auto_send (default: current directory)")
     send = commands.add_parser("send", help="default route: deliver a prompt to the Codex desktop app")
     send.add_argument("prompt")
     send.add_argument("--provider", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
     send.add_argument("--mode", choices=MODES, help="auto_send (default, sends via the official CLI) or prefill (explicit opt-in; user presses Send)")
-    send.add_argument("--workspace", help="absolute existing directory (codex path / claude code folder)")
+    send.add_argument("--workspace", help="absolute project directory; overrides config `workspace`, else the current directory")
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
     send.add_argument("--config", default="connector-config/connectors.json")
@@ -122,7 +132,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "init":
-            result = initialize(args.directory, args.isolated_logins)
+            result = initialize(args.directory, args.isolated_logins, args.workspace)
         elif args.command == "send":
             route = route_for(load_configuration(args.config), args.provider, mode=args.mode,
                               workspace=args.workspace, surface=args.surface)

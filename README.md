@@ -24,48 +24,48 @@ Official installers: [Claude Code](https://code.claude.com/docs/en/setup),
 [Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
 [Grok Build](https://docs.x.ai/build).
 
-## Quick start: Codex desktop app (default route)
+## Quick start: send into the desktop apps (default)
 
-New configurations default to `codex_app`, which uses the Codex desktop app on
-your ChatGPT subscription (Claude needs a paid Claude plan; API billing is refused).
-
-```sh
-atlas-connectors init connector-config
-atlas-connectors send 'Say hello'                 # auto_send (default)
-atlas-connectors send 'Say hello' --mode prefill  # you press Send in the app
-atlas-connectors send 'Say hello' --preview       # print link, launch nothing
-```
-
-`auto_send` runs `codex exec --skip-git-repo-check -s <sandbox> -o <tmp>/return.md`
-on your ChatGPT login (sandbox derived from the shared policy; `ask` maps to
-read-only, never broader), reads the session id, then opens
-`codex://threads/<session-id>`. No keystrokes or UI automation are used. Whether a
-CLI-sent session appears in the app's thread list is verified only by that deep
-link opening it. If no session id is found the result is `sent_session_unknown`
-and nothing is opened. CLI failure opens nothing and never falls back.
-`prefill` (explicit opt-in) opens `codex://threads/new?prompt=...` (optional `&path=`); the app never
-auto-submits, so the result is `prefilled_awaiting_user_send`. Set
-`"mode": "prefill"` on the `codex_app` route to make that the default.
-
-### Claude (auto-send by default)
+New configurations default to `codex_app`; `claude_app` is also available. Both
+**send automatically** (`auto_send`) and show the conversation in the desktop
+app. Prefill is an explicit opt-in. No keystroke or UI automation is used.
 
 ```sh
-claude auth login                                        # once, in the CLI, paid Claude plan
-atlas-connectors send 'Say hello' --provider claude_app  # sends now, returns reply + resume command
-atlas-connectors send 'Say hello' --provider claude_app --mode prefill [--surface chat]
+cd <your-project-dir>                                  # or pass --workspace
+atlas-connectors init connector-config [--workspace <absolute-project-dir>]
+atlas-connectors send 'Say hello'                      # codex_app
+atlas-connectors send 'Say hello' --provider claude_app
+atlas-connectors send 'Say hello' --mode prefill       # opt-in: you press Send
+atlas-connectors send 'Say hello' --preview            # print link, launch nothing
 ```
 
-Claude auto-send requires `claude auth login` with a paid Claude plan in the
-Claude Code CLI; that login is separate from the Claude desktop app login. API
-keys, Console billing and Bedrock/Vertex overrides are refused. It runs
-`claude -p --session-id <uuid4> --permission-mode <plan|acceptEdits>
---output-format json` (prompt on stdin; `acceptEdits` only when
-`write_files=allow`) and returns `sent`, the reply, the session id and
-`claude --resume <id>`. The Claude desktop app has no documented deep link to
-open a CLI session, so nothing is opened and the session is not claimed to
-appear in the app. `prefill` is an explicit opt-in (`claude://code/new?q=` or
-`claude://claude.ai/new?q=`, prompts over 14,000 characters refused; the user
-presses Send). Neither app route uses keystroke or UI automation.
+**Workspace** (auto_send), in order: `--workspace DIR`; `workspace` in your
+connector config (written only by `init --workspace DIR`); otherwise the
+current directory. It must be an absolute existing directory outside the system
+temp directory, or the send is refused with instructions. No folder is
+hardcoded; every user picks their own.
+
+**Codex** (Codex CLI 0.148.0 or 0.153.4, ChatGPT login; API keys/base URL
+overrides refused): spawns `codex app-server` (stdio JSON-RPC, normal
+`CODEX_HOME`), sends `initialize` (clientInfo `codex_vscode`), `initialized`,
+`thread/start {cwd, sandbox, approvalPolicy: "never"}` and `turn/start` with the
+prompt inside JSON, reads UTF-8 output until `turn/completed`, stops the server
+and opens `codex://threads/<id>`. Sandbox is `read-only` unless
+`write_files=allow` (`workspace-write`). Timeout after the turn was accepted
+gives `sent_completion_unknown`. Any earlier failure opens nothing and never
+falls back to `codex exec`. Verified live on Windows: the thread appeared in the
+Codex app.
+
+**Claude** (Claude Code >= 2.1.285; `claude auth login` with a paid Claude plan
+in the CLI, separate from the desktop app login; API key/Console/Bedrock/Vertex
+refused): runs `claude -p --permission-mode plan|acceptEdits --output-format
+json` in the workspace with the prompt on stdin, then launches `claude --desktop
+--resume <session_id>` detached in its own console (Windows
+`CREATE_NEW_CONSOLE`, no redirected stdio; `--desktop` refuses to run
+non-interactively). Exit 0 gives `sent`; otherwise `sent_handoff_failed` with
+`claude --resume <id>`. Verified live on Windows: the session appeared in the
+Claude app's Code tab. Prefill opt-in: `claude://code/new?q=` /
+`claude://claude.ai/new?q=` (14,000-character limit, refused not truncated).
 
 ## Install and connect
 

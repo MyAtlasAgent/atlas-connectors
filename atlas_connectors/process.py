@@ -13,7 +13,8 @@ def execute(argv, *, cwd, env, stdin="", timeout=120):
         raise ProcessError("Live CLI transport currently requires macOS or Linux")
     with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          text=True, start_new_session=True) as child:
+                          text=True, encoding="utf-8", errors="replace",
+                          start_new_session=True) as child:
         try:
             stdout, stderr = child.communicate(stdin, timeout=timeout)
         except BaseException as error:

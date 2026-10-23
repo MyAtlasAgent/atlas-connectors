@@ -26,14 +26,12 @@ This release supports file reads, listing and atomic writes. Other capabilities
 and desktop automation explicitly refuse. Historical reading copies under
 `reference/` are not imported or included in the installed wheel.
 
-`codex_app.py` is the default new-user route. `auto_send` sends through the
-Codex CLI on the ChatGPT login, then opens `codex://threads/<session-id>`;
-`prefill` opens `codex://threads/new?prompt=` and the user presses Send. The
-opener and runner are injectable; neither mode falls back to the other, another
-provider or API billing.
-
-`claude_app.py` auto-sends by default through the Claude Code CLI on the
-user's subscription login (`claude auth login`, paid plan, separate from the
-desktop app login) and returns `claude --resume <id>`; the desktop app has no
-documented link to open that session. `prefill` (opt-in) opens
-`claude://code/new?q=` or `claude://claude.ai/new?q=`. No API billing fallback.
+`codex_app.py` is the default new-user route. `auto_send` drives `codex
+app-server` over stdio JSON-RPC (initialize, initialized, thread/start,
+turn/start, wait for turn/completed) and opens `codex://threads/<id>`.
+`claude_app.py` auto_send runs `claude -p` in the workspace and hands off with a
+detached `claude --desktop --resume <id>`. Both need a real workspace (flag,
+then config, then current directory; temp dirs refused). `prefill` (opt-in)
+opens `codex://threads/new?prompt=` or `claude://code/new?q=` and the user
+presses Send. Spawner, runner, launcher and opener are injectable; no mode falls
+back to another, to another provider or to API billing.

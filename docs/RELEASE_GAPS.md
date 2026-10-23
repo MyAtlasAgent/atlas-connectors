@@ -8,13 +8,10 @@ Remaining:
 - Executors for arbitrary commands, network workload tools, Git and installation
   effects. Until enforceable, these requests explicitly refuse.
 - Automatic Grok Bot desktop integration; retain its separate manual route.
-- codex_app: CLI-sent sessions appearing in the desktop app's thread list is
-  verified only by the `codex://threads/<id>` link opening them; the accepted
-  Codex version list must include the user's client for auto_send.
-- claude_app: CLI-sent sessions cannot be opened in the desktop app (no
-  documented link); use `claude --resume <id>`. Cowork, `file` and
-  `claude://claude.ai/chat/{id}` are not implemented. Accepted versions
-  2.1.229/2.1.246 and Codex 0.148.0 are route-specific, not CLIAdapter-wide.
+- claude_app: desktop handoff relies on `claude --desktop --resume` (>= 2.1.285);
+  on failure use `claude --resume <id>`. Cowork, `file` and
+  `claude://claude.ai/chat/{id}` are not implemented. The Claude floor and
+  Codex 0.148.0 are route-specific, not CLIAdapter-wide.
 - Windows support (codex_app runs there; broker enforcement does not); directory-descriptor enforcement is POSIX only.
 - Qualification of additional client versions and OS combinations.
 - First-time new-account onboarding on a clean workstation. Existing logins with
@@ -25,3 +22,6 @@ Remaining:
 
 Historical Atlas source and installed Atlas runtime permissions remain separate.
 They are not invoked, installed or migrated by this package.
+
+- In-app delivery evidence is a manual live check on one Windows PC (Codex
+  0.148.0, Claude Code 2.1.302); not automated, not qualified on macOS/Linux.

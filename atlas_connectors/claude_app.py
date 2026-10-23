@@ -1,15 +1,17 @@
-"""Claude route: auto-send through the Claude Code CLI (default) or prefill opt-in.
+"""Claude route: auto-send in the Claude desktop app's Code tab (default) or prefill opt-in.
 
-``auto_send`` (default) runs the official ``claude`` CLI on the user's Claude
-subscription login in a new session with a generated UUID and returns the
-reply plus ``claude --resume <id>``. The Claude desktop app has no documented
-deep link that opens a CLI session, so nothing is opened and the result never
-claims the conversation appears in the app.
+``auto_send`` (default), verified live on Windows (session
+991819ea-393c-4b51-9c10-2fddf255b61d visible in the Claude app Code tab):
+run ``claude -p --permission-mode <plan|acceptEdits> --output-format json`` in
+the user's real workspace with the prompt on stdin (UTF-8), parse ``result``
+and ``session_id``, then hand off with ``claude --desktop --resume <id>``
+launched detached with its own console and no redirected stdio (``--desktop``
+refuses to run non-interactively). Requires Claude Code >= 2.1.285 and a
+``claude auth login`` subscription login (paid plan), separate from the
+desktop app login. API key/Console/Bedrock/Vertex are refused.
 
 ``prefill`` (explicit opt-in) opens ``claude://code/new?q=`` or
-``claude://claude.ai/new?q=``; Claude Desktop 1.1.2321+ never auto-submits, so
-the user presses Send. No keystroke/UI automation, no API billing fallback.
-Claude Code requires a paid Claude plan via ``claude auth login``.
+``claude://claude.ai/new?q=``; the user presses Send. No keystroke/UI automation.
 """
 from __future__ import annotations
 
@@ -22,10 +24,9 @@ import subprocess
 import sys
 import tempfile
 from urllib.parse import quote
-import uuid
 
-from .adapters import TESTED, AdapterError, client_environment
-from .codex_app import PREFILLED, UUID, _prompt, _workspace, system_runner
+from .adapters import AdapterError, client_environment
+from .codex_app import PREFILLED, UUID, WINDOWS_ENV, _prompt, _workspace, require_workspace, system_runner
 from .permissions import PermissionPolicy
 
 PROVIDER = "claude_app"
@@ -35,8 +36,8 @@ SURFACES = {"code": "claude://code/new", "chat": "claude://claude.ai/new"}
 DEFAULT_SURFACE = "code"
 MAX_PROMPT_CHARS = 14_000  # Claude truncates q around here; refuse instead
 MAX_SEND_BYTES = 200_000
-# Route-specific qualification: 2.1.229 is installed on the user's PC.
-ACCEPTED_VERSIONS = frozenset(TESTED["claude"]) | {"2.1.229"}
+MIN_VERSION = (2, 1, 285)  # first release whose --desktop handoff was verified
+HANDOFF_TIMEOUT = 30
 REFUSED_MODES = ("bypassPermissions", "dontAsk", "auto")
 
 
@@ -75,11 +76,29 @@ def permission_mode_for(policy: PermissionPolicy):
     return mode
 
 
+def system_launcher(argv, *, cwd, env, timeout=HANDOFF_TIMEOUT):
+    """Detached launch with its own console and inherited (not piped) stdio.
+
+    Returns the exit code, or None on timeout (the child is then killed).
+    """
+    if sys.platform == "win32":
+        flags = {"creationflags": subprocess.CREATE_NEW_CONSOLE}
+    else:
+        flags = {"start_new_session": True}
+    child = subprocess.Popen(argv, cwd=cwd, env=env, stdin=None, stdout=None, stderr=None, **flags)
+    try:
+        return child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+        return None
+
+
 class ClaudeAppRoute:
     provider = PROVIDER
 
     def __init__(self, policy, *, mode=DEFAULT_MODE, surface=DEFAULT_SURFACE, folder=None, opener=None,
-                 executable="claude", timeout=300, runner=None, which=None, session_factory=None):
+                 executable="claude", timeout=300, runner=None, which=None, launcher=None, workspace=None):
         if mode not in MODES:
             raise AdapterError("claude_app mode must be auto_send or prefill; no other fallback")
         if not isinstance(policy, PermissionPolicy):
@@ -93,7 +112,8 @@ class ClaudeAppRoute:
         self.opener = opener or system_opener
         self.executable, self.timeout = executable, timeout
         self.runner, self.which = runner or system_runner, which or shutil.which
-        self.session_factory = session_factory or (lambda: str(uuid.uuid4()))
+        self.launcher = launcher or system_launcher
+        self.workspace = _workspace(workspace) or self.folder
 
     def preview(self, prompt):
         return prefill_link(prompt, self.surface, self.folder)
@@ -109,6 +129,7 @@ class ClaudeAppRoute:
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_SEND_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
+        workspace = require_workspace(self.workspace)
         permission_mode = permission_mode_for(self.policy)
         found = self.which(self.executable)
         if not found:
@@ -116,52 +137,56 @@ class ClaudeAppRoute:
         executable = str(Path(found).resolve())
         # Refuses ANTHROPIC_API_KEY/AUTH_TOKEN/BASE_URL/Bedrock/Vertex before anything runs.
         env = client_environment("claude", Path.home(), None, default_claude_login=True)
-        for key in ("APPDATA", "LOCALAPPDATA", "USERPROFILE", "CLAUDE_CONFIG_DIR"):
+        for key in WINDOWS_ENV + ("CLAUDE_CONFIG_DIR",):
             if os.environ.get(key):
                 env[key] = os.environ[key]
-        with tempfile.TemporaryDirectory(prefix="connector-claude-app-") as directory:
-            cwd = self.folder or directory
-            code, out, _ = self.runner([executable, "--version"], cwd=cwd, env=env, timeout=15)
-            version = re.search(r"\b(\d+\.\d+\.\d+)\b", out or "")
-            if code or not version or version[1] not in ACCEPTED_VERSIONS:
-                raise AdapterError("Claude Code version is not qualified; nothing sent")
-            code, status, _ = self.runner([executable, "auth", "status"], cwd=cwd, env=env, timeout=15)
-            try:
-                status = json.loads(status)
-            except (ValueError, TypeError):
-                status = {}
-            if (code or not isinstance(status, dict) or status.get("loggedIn") is not True
-                    or status.get("authMethod") != "claude.ai"):
-                raise AdapterError("Claude subscription login required (claude auth login, paid plan); "
-                                   "API key/Console/unknown authentication refused; nothing sent")
-            session = self.session_factory()
-            if not re.fullmatch(UUID, session):
-                raise AdapterError("Invalid generated session id")
-            argv = [executable, "-p", "--session-id", session, "--permission-mode", permission_mode,
-                    "--output-format", "json"]
-            # Prompt goes on stdin (as the repo's Claude adapter does), so it can never be read as a flag.
-            code, out, _ = self.runner(argv, cwd=cwd, env=env, stdin=prompt, timeout=self.timeout)
+        code, out, _ = self.runner([executable, "--version"], cwd=workspace, env=env, timeout=15)
+        version = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", out or "")
+        if code or not version or tuple(map(int, version.groups())) < MIN_VERSION:
+            raise AdapterError("Claude Code >= 2.1.285 required for desktop handoff; nothing sent")
+        code, status, _ = self.runner([executable, "auth", "status"], cwd=workspace, env=env, timeout=15)
+        try:
+            status = json.loads(status)
+        except (ValueError, TypeError):
+            status = {}
+        if (code or not isinstance(status, dict) or status.get("loggedIn") is not True
+                or status.get("authMethod") != "claude.ai"):
+            raise AdapterError("Claude subscription login required (claude auth login, paid plan); "
+                               "API key/Console/unknown authentication refused; nothing sent")
+        argv = [executable, "-p", "--permission-mode", permission_mode, "--output-format", "json"]
+        # Prompt on stdin (UTF-8), so it can never be read as a flag.
+        code, out, _ = self.runner(argv, cwd=workspace, env=env, stdin=prompt, timeout=self.timeout)
         if code:
             raise AdapterError(f"claude_app auto_send: Claude CLI exit {code}; nothing opened, no fallback")
         try:
             envelope = json.loads(out)
-        except ValueError:
+        except (ValueError, TypeError):
             envelope = None
         if not isinstance(envelope, dict) or envelope.get("is_error"):
-            raise AdapterError("claude_app auto_send: invalid or error response; no fallback")
-        reported = envelope.get("session_id")
-        if isinstance(reported, str) and re.fullmatch(UUID, reported):
-            session_source = "envelope" if reported == session else "envelope_differs_from_requested"
-            session = reported
+            raise AdapterError("claude_app auto_send: invalid or error response; nothing opened, no fallback")
+        session = envelope.get("session_id")
+        result = {"provider": self.provider, "mode": "auto_send", "permission_mode": permission_mode,
+                  "client_version": ".".join(version.groups()), "executed": True, "workspace": workspace,
+                  "reply_text": envelope.get("result") or "", "text_provenance": "model_claim"}
+        if not isinstance(session, str) or not re.fullmatch(UUID, session):
+            result.update(status="sent_session_unknown", session_id=None, app_handoff="not_attempted",
+                          delivery="sent via Claude Code CLI; no session id, desktop handoff not attempted")
+            return result
+        resume = f"claude --resume {session}"
+        try:
+            handoff = self.launcher([executable, "--desktop", "--resume", session], cwd=workspace, env=env)
+        except OSError:
+            handoff = "launch_error"
+        result.update(session_id=session, resume_command=resume,
+                      handoff_command=f"claude --desktop --resume {session}")
+        if handoff == 0:
+            result.update(status="sent", app_handoff="ok",
+                          delivery="sent via Claude Code CLI; handed off to the Claude desktop app Code tab")
         else:
-            session_source = "requested_only"
-        return {"status": "sent", "provider": self.provider, "mode": "auto_send",
-                "permission_mode": permission_mode, "client_version": version[1], "executed": True,
-                "reply_text": envelope.get("result") or "", "text_provenance": "model_claim",
-                "session_id": session, "session_id_source": session_source,
-                "resume_command": f"claude --resume {session}", "app_thread_opened": False,
-                "delivery": "sent via Claude Code CLI; the Claude desktop app has no documented deep link "
-                            "to open this session, so it is not claimed to appear there"}
+            result.update(status="sent_handoff_failed",
+                          app_handoff="timeout" if handoff is None else f"exit {handoff}" if isinstance(handoff, int) else handoff,
+                          delivery="sent via Claude Code CLI; desktop handoff failed; use resume_command")
+        return result
 
     def deliver(self, prompt):
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)

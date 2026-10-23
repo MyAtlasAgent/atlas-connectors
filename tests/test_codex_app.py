@@ -1,7 +1,8 @@
-"""codex_app default route: encoding, validation, honest delivery, no launches."""
+"""codex_app default route: app-server protocol, prefill opt-in, no launches."""
 import json
 import os
 from pathlib import Path
+import queue
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -10,21 +11,28 @@ from urllib.parse import parse_qs, urlsplit
 from atlas_connectors.adapters import AdapterError
 from atlas_connectors.cli import initialize, main, route_for
 from atlas_connectors.codex_app import (
-    DEFAULT_PROVIDER, MAX_LINK_BYTES, CodexAppRoute, prefill_link, sandbox_for, thread_link)
+    CLIENT_INFO, DEFAULT_PROVIDER, MAX_LINK_BYTES, CodexAppRoute, prefill_link, require_workspace,
+    sandbox_for, thread_link)
 from atlas_connectors.permissions import PROVIDERS, PermissionPolicy, load_configuration
 
 ROOT = Path(__file__).resolve().parents[1]
-SID = "01a169df-495e-79f3-891a-b3c96eed6b34"
+TID = "01a169f1-5263-7580-8f28-cd814fbdb775"
 
 
 def policy(default="ask", **capabilities):
     return PermissionPolicy.from_dict({"version": 1, "default": default, "capabilities": capabilities})
 
 
+def project_dir(test):
+    """A real (non-temp) directory, as auto_send requires."""
+    directory = tempfile.TemporaryDirectory(dir=ROOT, prefix=".test-workspace-")
+    test.addCleanup(directory.cleanup)
+    return directory.name
+
+
 class FakeRunner:
-    def __init__(self, exec_result=(0, "", f"session id: {SID}\n"), version="codex-cli 0.153.4",
-                 login="Logged in using ChatGPT"):
-        self.calls, self.exec_result, self.version, self.login = [], exec_result, version, login
+    def __init__(self, version="codex-cli 0.148.0", login="Logged in using ChatGPT"):
+        self.calls, self.version, self.login = [], version, login
 
     def __call__(self, argv, *, cwd, env, stdin="", timeout=120):
         self.calls.append(list(argv))
@@ -32,137 +40,209 @@ class FakeRunner:
             return 0, self.version, ""
         if argv[1:3] == ["login", "status"]:
             return 0, self.login, ""
-        output = Path(argv[argv.index("-o") + 1])
-        if self.exec_result[0] == 0:
-            output.write_text("hello back")
-        return self.exec_result
+        raise AssertionError("codex exec must never run")
+
+
+class FakeAppServer:
+    """Scripted stdio JSON-RPC server; records every client message."""
+
+    def __init__(self, reply="Hi — Codex here", complete=True, fail=None, thread_id=TID, turn_status="completed"):
+        self.sent, self.out = [], queue.Queue()
+        self.reply, self.complete, self.fail, self.thread_id, self.turn_status = reply, complete, fail, thread_id, turn_status
+        self.terminated, self.argv, self.cwd = False, None, None
+        server = self
+
+        class Stdin:
+            def write(self, data):
+                server.receive(json.loads(data.decode("utf-8")))
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
+
+        class Stdout:
+            def readline(self):
+                return server.out.get()
+
+        self.stdin, self.stdout = Stdin(), Stdout()
+
+    def emit(self, message):
+        self.out.put((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
+
+    def receive(self, message):
+        self.sent.append(message)
+        method, ident = message.get("method"), message.get("id")
+        if method == self.fail:
+            self.emit({"id": ident, "error": {"code": 1, "message": "boom"}})
+        elif method == "initialize":
+            self.emit({"id": ident, "result": {"userAgent": "fake"}})
+        elif method == "thread/start":
+            self.emit({"id": ident, "result": {"thread": {"id": self.thread_id}}})
+        elif method == "turn/start":
+            self.emit({"id": ident, "result": {"turn": {"id": "t1", "status": "inProgress"}}})
+            self.emit({"id": 99, "method": "item/commandExecution/requestApproval", "params": {}})
+            self.emit({"method": "item/agentMessage/delta", "params": {"delta": "Hi "}})
+            if self.complete:
+                self.emit({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": self.reply}}})
+                self.emit({"method": "turn/completed", "params": {"turn": {"status": self.turn_status}}})
+
+    def __call__(self, argv, *, cwd, env):
+        self.argv, self.cwd = argv, cwd
+        return self
+
+    def terminate(self):
+        self.terminated = True
+        self.out.put(b"")
+
+    def wait(self, timeout=None):
+        return 0
+
+    def kill(self):
+        pass
 
 
 class Route(unittest.TestCase):
     def setUp(self):
         self.opened = []
-        self.sessions = tempfile.TemporaryDirectory()
-        self.addCleanup(self.sessions.cleanup)
+        self.workspace = project_dir(self)
         env = patch.dict(os.environ, {k: "" for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL")})
         env.start()
         self.addCleanup(env.stop)
 
-    def route(self, runner=None, **kwargs):
+    def route(self, server=None, runner=None, **kwargs):
         kwargs.setdefault("policy", policy())
+        kwargs.setdefault("workspace", self.workspace)
         return CodexAppRoute(kwargs.pop("policy"), runner=runner or FakeRunner(), opener=self.opened.append,
-                             sessions_dir=self.sessions.name, which=lambda name: "/usr/bin/true", **kwargs)
+                             spawner=server or FakeAppServer(), which=lambda name: "/usr/bin/true", **kwargs)
 
-    # prefill link
+    # prefill (opt-in)
     def test_prefill_link_encodes_every_reserved_character(self):
         prompt = "Hi & bye? #1 a+b=c / 100% \"q\" é\nnext"
         link = prefill_link(prompt)
-        self.assertTrue(link.startswith("codex://threads/new?prompt="))
         tail = link.split("prompt=", 1)[1]
         for char in "&?#+= /\"\n":
             self.assertNotIn(char, tail)
         self.assertEqual(parse_qs(urlsplit(link).query)["prompt"], [prompt])
 
     def test_path_must_be_absolute_existing_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
-            link = prefill_link("x", directory)
-            self.assertEqual(parse_qs(urlsplit(link).query)["path"], [str(Path(directory).resolve())])
-            for bad in ("relative/dir", directory + "/missing"):
-                with self.assertRaises(AdapterError):
-                    prefill_link("x", bad)
-            file = Path(directory) / "f"
-            file.write_text("")
+        link = prefill_link("x", self.workspace)
+        self.assertEqual(parse_qs(urlsplit(link).query)["path"], [str(Path(self.workspace).resolve())])
+        for bad in ("relative/dir", self.workspace + "/missing"):
             with self.assertRaises(AdapterError):
-                prefill_link("x", str(file))
+                prefill_link("x", bad)
 
-    def test_overlong_or_empty_prompt_refuses_with_clear_error(self):
+    def test_overlong_or_empty_prompt_refuses(self):
         with self.assertRaisesRegex(AdapterError, "too long"):
             prefill_link("x" * MAX_LINK_BYTES)
         for bad in ("", "  ", "a\x00b", None):
             with self.assertRaises(AdapterError):
                 prefill_link(bad)
 
-    def test_prefill_mode_opens_link_and_never_claims_send(self):
+    def test_prefill_is_opt_in_and_never_claims_send(self):
+        self.assertEqual(CodexAppRoute(policy()).mode, "auto_send")
         result = self.route(mode="prefill").deliver("hello")
-        self.assertEqual(self.opened, [prefill_link("hello")])
         self.assertEqual(result["status"], "prefilled_awaiting_user_send")
         self.assertFalse(result["executed"])
-        self.assertFalse(result["returned"])
-        self.assertNotIn("sent", result["status"])
+        self.assertEqual(len(self.opened), 1)
 
-    def test_prefill_refusal_never_calls_opener(self):
-        with self.assertRaises(AdapterError):
-            self.route(mode="prefill").deliver("x" * MAX_LINK_BYTES)
-        with self.assertRaises(AdapterError):
-            self.route(mode="prefill", workspace="relative")
-        self.assertEqual(self.opened, [])
-
-    # auto send
-    def test_auto_send_success_opens_thread_with_parsed_uuid(self):
-        runner = FakeRunner()
-        result = self.route(runner).deliver("hello")
-        self.assertEqual(self.opened, [f"codex://threads/{SID}"])
+    # auto send via app-server
+    def test_protocol_sequence_and_thread_link(self):
+        server = FakeAppServer()
+        result = self.route(server).deliver("--hello é")
+        self.assertEqual(server.argv[1:], ["app-server"])
+        self.assertEqual(server.cwd, str(Path(self.workspace).resolve()))
+        methods = [m.get("method") for m in server.sent if "method" in m]
+        self.assertEqual(methods, ["initialize", "initialized", "thread/start", "turn/start"])
+        self.assertEqual(server.sent[0], {"id": 0, "method": "initialize", "params": {"clientInfo": CLIENT_INFO}})
+        self.assertEqual(server.sent[2]["params"], {"cwd": str(Path(self.workspace).resolve()),
+                                                    "sandbox": "read-only", "approvalPolicy": "never"})
+        turn = next(m for m in server.sent if m.get("method") == "turn/start")
+        self.assertEqual(turn["params"], {"threadId": TID, "input": [{"type": "text", "text": "--hello é"}]})
+        refusal = next(m for m in server.sent if m.get("id") == 99)
+        self.assertIn("error", refusal)  # server approval requests are never auto-approved
+        self.assertTrue(server.terminated)
+        self.assertEqual(self.opened, [f"codex://threads/{TID}"])
         self.assertEqual(result["status"], "sent")
-        self.assertEqual(result["session_id"], SID)
-        self.assertEqual(result["reply_text"], "hello back")
-        self.assertIn("not verified", result["delivery"])
-        argv = runner.calls[-1]
-        self.assertEqual(argv[1:3], ["exec", "--skip-git-repo-check"])
-        self.assertEqual(argv[argv.index("-s") + 1], "read-only")
-        self.assertEqual(argv[-1], "hello")
+        self.assertEqual(result["thread_id"], TID)
 
-    def test_uuid_from_json_event_or_rollout_file(self):
-        result = self.route(FakeRunner(exec_result=(0, json.dumps({"type": "thread.started", "thread_id": SID}), ""))).deliver("hi")
-        self.assertEqual(result["session_id"], SID)
-        day = Path(self.sessions.name) / "2026" / "10" / "23"
-        day.mkdir(parents=True)
-        (day / f"rollout-2026-10-23T12-00-00-{SID}.jsonl").write_text("{}")
-        result = self.route(FakeRunner(exec_result=(0, "", ""))).deliver("hi")
-        self.assertEqual(result["session_id_source"], "rollout_file")
+    def test_reply_is_decoded_as_utf8_including_em_dash(self):
+        result = self.route(FakeAppServer(reply="Hi — Codex here ✓")).deliver("hello")
+        self.assertEqual(result["reply_text"], "Hi — Codex here ✓")
+        self.assertNotIn("â€", result["reply_text"])
 
-    def test_missing_uuid_reports_unknown_and_opens_nothing(self):
-        result = self.route(FakeRunner(exec_result=(0, "", "no id here"))).deliver("hello")
-        self.assertEqual(result["status"], "sent_session_unknown")
-        self.assertFalse(result["app_thread_opened"])
-        self.assertIsNone(result["link"])
-        self.assertEqual(self.opened, [])
+    def test_timeout_after_accepted_turn_reports_unknown_completion(self):
+        server = FakeAppServer(complete=False)
+        result = self.route(server, timeout=0.3).deliver("hello")
+        self.assertEqual(result["status"], "sent_completion_unknown")
+        self.assertEqual(result["completion"], "timeout")
+        self.assertTrue(server.terminated)
 
-    def test_cli_failure_opens_nothing_and_never_falls_back(self):
-        runner = FakeRunner(exec_result=(1, "", "error"))
-        with self.assertRaisesRegex(AdapterError, "no fallback"):
-            self.route(runner).deliver("hello")
-        self.assertEqual(self.opened, [])
-        self.assertEqual(sum(1 for c in runner.calls if "exec" in c), 1)
-
-    def test_unknown_version_and_api_login_refuse_before_send(self):
-        self.assertEqual(self.route(FakeRunner(version="codex-cli 0.148.0")).deliver("hi")["status"], "sent")
-        self.opened.clear()
-        for runner in (FakeRunner(version="codex-cli 0.147.0"), FakeRunner(login="Logged in using an API key")):
-            with self.assertRaises(AdapterError):
-                self.route(runner).deliver("hello")
+    def test_protocol_failure_opens_nothing_and_never_falls_back(self):
+        for kwargs in ({"fail": "initialize"}, {"fail": "thread/start"}, {"fail": "turn/start"},
+                       {"thread_id": "not-a-uuid"}, {"turn_status": "failed"}):
+            runner, server = FakeRunner(), FakeAppServer(**kwargs)
+            with self.subTest(**kwargs), self.assertRaisesRegex(AdapterError, "no fallback"):
+                self.route(server, runner).deliver("hello")
+            self.assertTrue(server.terminated)
             self.assertFalse(any("exec" in c for c in runner.calls))
-        with patch.dict(os.environ, {"OPENAI_API_KEY": "fixture"}):
-            with self.assertRaises(AdapterError):
-                self.route().deliver("hello")
         self.assertEqual(self.opened, [])
 
-    def test_sandbox_follows_shared_policy_and_refuses_rather_than_broadens(self):
-        self.assertEqual(sandbox_for(policy())[0], "read-only")
-        self.assertFalse(sandbox_for(policy())[1]["features.shell_tool"])
-        self.assertEqual(sandbox_for(policy("deny", read_files="allow", write_files="allow"))[0], "workspace-write")
+    def test_preflight_refusals_spawn_nothing(self):
+        for runner in (FakeRunner(version="codex-cli 0.147.0"), FakeRunner(login="Logged in using an API key")):
+            server = FakeAppServer()
+            with self.assertRaises(AdapterError):
+                self.route(server, runner).deliver("hello")
+            self.assertIsNone(server.argv)
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "fixture"}), self.assertRaises(AdapterError):
+            self.route().deliver("hello")
+        self.assertEqual(self.opened, [])
+
+    def test_sandbox_follows_shared_policy(self):
+        self.assertEqual(sandbox_for(policy()), "read-only")
+        self.assertEqual(sandbox_for(policy("deny", read_files="allow", write_files="allow")), "workspace-write")
         with self.assertRaises(AdapterError):
             sandbox_for(policy("deny"))
 
-    def test_option_like_prompt_and_bad_thread_id_refuse(self):
-        with self.assertRaises(AdapterError):
-            self.route().deliver("--yolo")
+    def test_bad_thread_id_refuses(self):
         with self.assertRaises(AdapterError):
             thread_link("../evil")
 
 
-class DefaultSelection(unittest.TestCase):
-    def test_auto_send_is_default_and_prefill_is_opt_in(self):
-        self.assertEqual(CodexAppRoute(policy()).mode, "auto_send")
+class Workspace(unittest.TestCase):
+    def test_temp_dir_and_invalid_paths_refused_with_guidance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            for bad in (temporary, tempfile.gettempdir(), "relative", "/definitely/missing"):
+                with self.assertRaisesRegex(AdapterError, "--workspace"):
+                    require_workspace(bad)
 
+    def test_resolution_order_flag_then_config_then_cwd(self):
+        flag, config_dir, cwd = project_dir(self), project_dir(self), project_dir(self)
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".test-config-") as cfg:
+            configuration = load_configuration(initialize(cfg, workspace=config_dir)["configuration"])
+            self.assertEqual(route_for(configuration, workspace=flag).workspace, str(Path(flag).resolve()))
+            self.assertEqual(route_for(configuration).workspace, str(Path(config_dir).resolve()))
+            self.assertEqual(route_for(configuration, "claude_app").workspace, str(Path(config_dir).resolve()))
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".test-config-") as cfg:
+            configuration = load_configuration(initialize(cfg)["configuration"])
+            self.assertNotIn("workspace", configuration.providers["codex_app"])
+            route = route_for(configuration)
+            self.assertIsNone(route.workspace)
+            previous = os.getcwd()
+            os.chdir(cwd)
+            try:
+                self.assertEqual(require_workspace(route.workspace), str(Path(cwd).resolve()))
+            finally:
+                os.chdir(previous)
+
+    def test_init_workspace_must_be_absolute_existing(self):
+        with tempfile.TemporaryDirectory() as cfg:
+            with self.assertRaises(ValueError):
+                initialize(cfg, workspace="relative/dir")
+
+
+class DefaultSelection(unittest.TestCase):
     def test_codex_app_is_default_in_examples_init_and_cli(self):
         self.assertEqual(PROVIDERS[0], DEFAULT_PROVIDER)
         example = load_configuration(ROOT / "examples/operators.example.json")
@@ -175,7 +255,7 @@ class DefaultSelection(unittest.TestCase):
             self.assertEqual(route.mode, "auto_send")
             self.assertIs(route.policy, configuration.policy)
             with self.assertRaises(AdapterError):
-                route_for(configuration, "codex")  # CLI providers stay on `run`
+                route_for(configuration, "codex")
             with patch("atlas_connectors.codex_app.system_opener", side_effect=AssertionError("launched")), \
                     patch("sys.stdout"):
                 self.assertEqual(main(["send", "hi", "--preview", "--config",

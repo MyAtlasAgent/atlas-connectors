@@ -15,18 +15,18 @@ from atlas_connectors.permissions import PROVIDERS, ConfigurationError, Permissi
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = PermissionPolicy.from_dict({"version": 1, "default": "ask", "capabilities": {}})
-SID = "5b2f6c1e-8d4a-4c3b-9e7f-0a1b2c3d4e5f"
+SID = "991819ea-393c-4b51-9c10-2fddf255b61d"
 NO_API = {k: "" for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                           "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
                           "OPENAI_API_KEY", "OPENAI_BASE_URL", "XAI_API_KEY")}
 
 
 class FakeClaude:
-    def __init__(self, version="2.1.229 (Claude Code)", status=None, result=None):
+    def __init__(self, version="2.1.302 (Claude Code)", status=None, result=None):
         self.version, self.calls, self.stdin = version, [], []
         self.status = status if status is not None else {"loggedIn": True, "authMethod": "claude.ai"}
         self.result = result or (0, json.dumps({"type": "result", "is_error": False,
-                                                 "result": "Hello back", "session_id": SID}), "")
+                                                 "result": "Hello — back ✓", "session_id": SID}), "")
 
     def __call__(self, argv, *, cwd, env, stdin="", timeout=120):
         self.calls.append(list(argv))
@@ -35,7 +35,19 @@ class FakeClaude:
         if argv[1:] == ["auth", "status"]:
             return 0, json.dumps(self.status), ""
         self.stdin.append(stdin)
+        self.cwd = cwd
         return self.result
+
+
+class FakeLauncher:
+    def __init__(self, code=0):
+        self.code, self.calls = code, []
+
+    def __call__(self, argv, *, cwd, env, timeout=30):
+        self.calls.append((list(argv), cwd))
+        if isinstance(self.code, Exception):
+            raise self.code
+        return self.code
 
 
 class ClaudeApp(unittest.TestCase):
@@ -44,43 +56,85 @@ class ClaudeApp(unittest.TestCase):
         env = patch.dict(os.environ, NO_API)
         env.start()
         self.addCleanup(env.stop)
+        workspace = tempfile.TemporaryDirectory(dir=ROOT, prefix=".test-workspace-")
+        self.addCleanup(workspace.cleanup)
+        self.workspace = str(Path(workspace.name).resolve())
+        self.launcher = FakeLauncher()
 
     def route(self, **kwargs):
         kwargs.setdefault("mode", "prefill")
         return ClaudeAppRoute(kwargs.pop("policy", POLICY), opener=self.opened.append,
-                              which=lambda name: "/usr/bin/true", session_factory=lambda: SID, **kwargs)
+                              which=lambda name: "/usr/bin/true", **kwargs)
 
     def send(self, runner, **kwargs):
+        kwargs.setdefault("workspace", self.workspace)
+        kwargs.setdefault("launcher", self.launcher)
         return self.route(mode="auto_send", runner=runner, **kwargs).deliver("--hello")
 
     def test_default_mode_is_auto_send(self):
         self.assertEqual(ClaudeAppRoute(POLICY).mode, "auto_send")
 
-    def test_auto_send_success_returns_reply_session_and_resume(self):
+    def test_auto_send_success_hands_off_to_desktop(self):
         runner = FakeClaude()
         result = self.send(runner)
         self.assertEqual(result["status"], "sent")
-        self.assertEqual(result["reply_text"], "Hello back")
+        self.assertEqual(result["app_handoff"], "ok")
+        self.assertEqual(result["reply_text"], "Hello — back ✓")
         self.assertEqual(result["session_id"], SID)
-        self.assertEqual(result["session_id_source"], "envelope")
         self.assertEqual(result["resume_command"], f"claude --resume {SID}")
-        self.assertFalse(result["app_thread_opened"])
-        self.assertIn("no documented deep link", result["delivery"])
         self.assertEqual(self.opened, [])
         argv = runner.calls[-1]
-        self.assertEqual(argv[1:4], ["-p", "--session-id", SID])
-        self.assertEqual(argv[argv.index("--permission-mode") + 1], "plan")
+        self.assertEqual(argv[1:], ["-p", "--permission-mode", "plan", "--output-format", "json"])
         self.assertEqual(runner.stdin, ["--hello"])  # prompt on stdin, never parsed as a flag
-        for token in argv:
-            self.assertNotIn("dangerously", token)
-            self.assertNotIn(token, ("bypassPermissions", "dontAsk"))
+        self.assertEqual(runner.cwd, self.workspace)
+        self.assertEqual(self.launcher.calls, [(["/usr/bin/true", "--desktop", "--resume", SID], self.workspace)])
 
-    def test_session_id_falls_back_to_requested_or_reports_difference(self):
-        other = "11111111-2222-4333-8444-555555555555"
-        for envelope, source, expected in (({"result": "x"}, "requested_only", SID),
-                                           ({"result": "x", "session_id": other}, "envelope_differs_from_requested", other)):
-            result = self.send(FakeClaude(result=(0, json.dumps(envelope), "")))
-            self.assertEqual((result["session_id_source"], result["session_id"]), (source, expected))
+    def test_handoff_failure_or_timeout_reports_resume_command(self):
+        for code, label in ((1, "exit 1"), (None, "timeout"), (OSError("x"), "launch_error")):
+            launcher = FakeLauncher(code)
+            result = self.send(FakeClaude(), launcher=launcher)
+            self.assertEqual(result["status"], "sent_handoff_failed")
+            self.assertEqual(result["app_handoff"], label)
+            self.assertEqual(result["resume_command"], f"claude --resume {SID}")
+            self.assertEqual(len(launcher.calls), 1)
+        self.assertEqual(self.opened, [])
+
+    def test_missing_session_id_skips_handoff_honestly(self):
+        result = self.send(FakeClaude(result=(0, json.dumps({"result": "x"}), "")))
+        self.assertEqual(result["status"], "sent_session_unknown")
+        self.assertEqual(self.launcher.calls, [])
+
+    def test_version_floor_2_1_285(self):
+        for version in ("2.1.229", "2.1.284", "1.9.999"):
+            runner = FakeClaude(version=version)
+            with self.assertRaisesRegex(AdapterError, "2.1.285"):
+                self.send(runner)
+            self.assertEqual(runner.stdin, [])
+        self.assertEqual(self.send(FakeClaude(version="2.1.285"))["status"], "sent")
+        self.assertEqual(self.send(FakeClaude(version="2.2.0"))["status"], "sent")
+
+    def test_auto_send_refuses_temp_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(AdapterError, "temp"):
+            self.send(FakeClaude(), workspace=temporary)
+
+    def test_detached_launcher_flags(self):
+        import subprocess
+        from atlas_connectors import claude_app
+        captured = {}
+
+        class Child:
+            def __init__(self, argv, **kwargs):
+                captured.update(kwargs, argv=argv)
+
+            def wait(self, timeout=None):
+                return 0
+        with patch.object(claude_app.subprocess, "Popen", Child), patch.object(claude_app.sys, "platform", "win32"), \
+                patch.object(claude_app.subprocess, "CREATE_NEW_CONSOLE", 0x10, create=True):
+            self.assertEqual(claude_app.system_launcher(["claude", "--desktop", "--resume", SID], cwd=self.workspace, env={}), 0)
+        self.assertEqual(captured["creationflags"], 0x10)
+        for stream in ("stdin", "stdout", "stderr"):
+            self.assertIsNone(captured[stream])
+        self.assertEqual(captured["cwd"], self.workspace)
 
     def test_permission_mode_follows_shared_policy(self):
         allow = PermissionPolicy.from_dict({"version": 1, "default": "deny",
@@ -111,6 +165,7 @@ class ClaudeApp(unittest.TestCase):
                 self.send(runner)
             self.assertEqual(len(runner.stdin), 1)
         self.assertEqual(self.opened, [])
+        self.assertEqual(self.launcher.calls, [])
 
     def test_surfaces_and_encoding(self):
         prompt = "Hi & bye? #1 a+b=c / 100% \"q\" é\nnext"

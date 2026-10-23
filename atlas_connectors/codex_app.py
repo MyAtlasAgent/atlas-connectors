@@ -1,26 +1,30 @@
 """Default new-user route: the Codex desktop app on the user's ChatGPT login.
 
-Two delivery modes, both explicit and honest about what was observed:
+* ``auto_send`` (default): spawn ``codex app-server`` (stdio JSON-RPC, one
+  message per line, normal CODEX_HOME), start a thread in the user's real
+  workspace, start a turn with the prompt, collect the reply until
+  ``turn/completed``, terminate the server, then open ``codex://threads/<id>``.
+  Verified live on Windows: thread 01a169f1-5263-7580-8f28-cd814fbdb775 was
+  visible in the Codex app. The prompt travels inside JSON, never argv.
+* ``prefill`` (explicit opt-in only): ``codex://threads/new?prompt=...``; the
+  app never auto-submits, so the user presses Send.
 
-* ``auto_send`` (default): the official Codex CLI sends the prompt on the
-  user's ChatGPT subscription in a fresh session, then the app is pointed at
-  that session with ``codex://threads/<uuid>``. No keystrokes or UI automation.
-* ``prefill`` (explicit opt-in only): ``codex://threads/new?prompt=...`` opens a new desktop thread
-  with the composer prefilled. The app never auto-submits; the user presses Send.
-
-Runner and opener are injectable so tests launch nothing. A failure never falls
-back to another mode, provider, CLI or API billing.
+Spawner, runner and opener are injectable so tests launch nothing. Any failure
+runs once, opens nothing and never falls back to ``codex exec``, another
+provider or API billing. No keystroke/UI automation.
 """
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from urllib.parse import quote
 
@@ -31,12 +35,14 @@ from .process import execute
 DEFAULT_PROVIDER = "codex_app"
 MODES = ("auto_send", "prefill")
 DEFAULT_MODE = "auto_send"
-MAX_LINK_BYTES = 8000  # conservative OS URL-handler limit (Windows ShellExecute ~ 2K-32K)
+MAX_LINK_BYTES = 8000  # conservative OS URL-handler limit
 MAX_PROMPT_BYTES = 200_000
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 PREFILLED = "prefilled_awaiting_user_send"
-# Route-specific qualification: 0.148.0 verified live (ChatGPT login, exec -s read-only).
+# Route-specific qualification: 0.148.0 verified live (ChatGPT login, app-server).
 ACCEPTED_VERSIONS = frozenset(TESTED["codex"]) | {"0.148.0"}
+CLIENT_INFO = {"name": "codex_vscode", "title": "Atlas Connectors", "version": "0.1"}
+WINDOWS_ENV = ("APPDATA", "LOCALAPPDATA", "USERPROFILE", "PROGRAMDATA", "SystemDrive", "COMSPEC", "PATHEXT")
 
 
 def _workspace(path):
@@ -44,10 +50,30 @@ def _workspace(path):
         return None
     candidate = Path(path)
     if not candidate.is_absolute():
-        raise AdapterError("codex_app path must be an absolute directory")
+        raise AdapterError("Workspace/path must be an absolute directory")
     if not candidate.is_dir():
-        raise AdapterError("codex_app path must be an existing directory")
+        raise AdapterError("Workspace/path must be an existing directory")
     return str(candidate.resolve())
+
+
+def temporary_root():
+    return Path(tempfile.gettempdir()).resolve()
+
+
+def require_workspace(path):
+    """Resolve the auto_send workspace: explicit/config value, else the current directory.
+
+    It must be an absolute existing directory outside the system temp dir.
+    """
+    how = " Set one with --workspace DIR or `atlas-connectors init --workspace DIR`, or run from your project directory."
+    chosen = path if path is not None else os.getcwd()
+    try:
+        resolved = Path(_workspace(chosen))
+    except AdapterError as error:
+        raise AdapterError(f"auto_send workspace {chosen!r} is invalid: {error}.{how}") from None
+    if resolved == temporary_root() or resolved.is_relative_to(temporary_root()):
+        raise AdapterError(f"auto_send refuses a workspace inside the system temp directory ({resolved}).{how}")
+    return str(resolved)
 
 
 def _prompt(prompt):
@@ -72,7 +98,7 @@ def prefill_link(prompt, path=None):
 
 def thread_link(session_id):
     if not isinstance(session_id, str) or not re.fullmatch(UUID, session_id):
-        raise AdapterError("Invalid Codex session id")
+        raise AdapterError("Invalid Codex thread id")
     return "codex://threads/" + session_id
 
 
@@ -87,34 +113,106 @@ def system_opener(url):
 
 
 def system_runner(argv, *, cwd, env, stdin="", timeout=120):
+    """Bounded child process; output always decoded as UTF-8 (also on Windows)."""
     if os.name == "posix":
         return execute(argv, cwd=cwd, env=env, stdin=stdin, timeout=timeout)
-    done = subprocess.run(argv, cwd=cwd, env=env, input=stdin, capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run(argv, cwd=cwd, env=env, input=stdin, capture_output=True, timeout=timeout,
+                          text=True, encoding="utf-8", errors="replace")
     return done.returncode, done.stdout, done.stderr
 
 
-def sandbox_for(policy: PermissionPolicy):
-    """Map the shared policy to Codex native controls; refuse rather than broaden.
+def system_spawner(argv, *, cwd, env):
+    """Start a long-lived stdio child with binary pipes (decoded by the caller)."""
+    flags = {"creationflags": subprocess.CREATE_NO_WINDOW} if sys.platform == "win32" else {"start_new_session": True}
+    return subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, **flags)
 
-    Codex exec cannot ask interactively, so "ask" maps to the narrower setting.
-    """
+
+def client_env(home_dir):
+    env = client_environment("codex", Path.home(), home_dir)
+    for key in WINDOWS_ENV:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    return env
+
+
+def sandbox_for(policy: PermissionPolicy):
+    """Shared policy -> app-server sandbox; refuse rather than broaden."""
     if policy.preference("read_files") == "deny":
         raise AdapterError("Shared policy denies read_files; Codex cannot run without reading the workspace")
-    sandbox = "workspace-write" if policy.preference("write_files") == "allow" else "read-only"
-    overrides = {"approval_policy": "never",
-                 "features.shell_tool": policy.preference("run_commands") == "allow",
-                 "web_search": "live" if policy.preference("network") == "allow" else "disabled",
-                 "mcp_servers": {}, "plugins": {}}
-    if policy.preference("connected_tools") != "allow":
-        overrides["apps._default.enabled"] = False
-    return sandbox, overrides
+    return "workspace-write" if policy.preference("write_files") == "allow" else "read-only"
+
+
+class AppServerSession:
+    """Line-delimited JSON-RPC over the child's stdio, UTF-8 decoded explicitly."""
+
+    def __init__(self, process):
+        self.process, self.lines = process, queue.Queue()
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        try:
+            for raw in iter(self.process.stdout.readline, b""):
+                self.lines.put(raw.decode("utf-8", errors="replace"))
+        finally:
+            self.lines.put(None)
+
+    def send(self, message):
+        self.process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
+        self.process.stdin.flush()
+
+    def next(self, deadline):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                line = self.lines.get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError from None
+            if line is None:
+                raise EOFError
+            try:
+                message = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(message, dict):
+                if "id" in message and "method" in message:
+                    # Server-initiated request (e.g. approval): refuse; never auto-approve.
+                    self.send({"id": message["id"], "error": {"code": -32601, "message": "Refused by connector"}})
+                    continue
+                return message
+
+    def call(self, ident, method, params, deadline, collect):
+        self.send({"id": ident, "method": method, "params": params})
+        while True:
+            message = self.next(deadline)
+            if message.get("id") == ident:
+                if "error" in message:
+                    raise AdapterError(f"codex app-server {method} failed; nothing opened, no fallback")
+                return message.get("result") or {}
+            collect(message)
+
+    def close(self):
+        try:
+            self.process.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.process.terminate()
+            self.process.wait(timeout=5)
+        except Exception:
+            try:
+                self.process.kill()
+            except Exception:
+                pass
 
 
 class CodexAppRoute:
     provider = DEFAULT_PROVIDER
 
     def __init__(self, policy, *, mode=DEFAULT_MODE, executable="codex", workspace=None,
-                 timeout=300, runner=None, opener=None, sessions_dir=None, which=None):
+                 timeout=300, runner=None, opener=None, spawner=None, codex_home=None, which=None):
         if mode not in MODES:
             raise AdapterError("codex_app mode must be auto_send or prefill; no other fallback")
         if not isinstance(policy, PermissionPolicy):
@@ -122,11 +220,9 @@ class CodexAppRoute:
         self.policy, self.mode, self.timeout = policy, mode, timeout
         self.executable, self.workspace = executable, _workspace(workspace)
         self.runner, self.opener = runner or system_runner, opener or system_opener
-        self.which = which or shutil.which
-        self.sessions_dir = Path(sessions_dir) if sessions_dir else (
-            Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions")
+        self.spawner, self.which = spawner or system_spawner, which or shutil.which
+        self.codex_home = Path(codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex")
 
-    # -- prefill -----------------------------------------------------------
     def preview(self, prompt):
         return prefill_link(prompt, self.workspace)
 
@@ -136,70 +232,84 @@ class CodexAppRoute:
         return {"status": PREFILLED, "provider": self.provider, "mode": "prefill", "link": link,
                 "delivery": "prefilled, awaiting user send", "executed": False, "returned": False}
 
-    # -- auto send ---------------------------------------------------------
-    def _session_id(self, stdout, stderr, started):
-        text = stdout + "\n" + stderr
-        match = (re.search(r"session id:\s*(" + UUID + ")", text, re.I)
-                 or re.search(r'"(?:thread_id|session_id)"\s*:\s*"(' + UUID + ')"', text))
-        if match:
-            return match[1], "cli_output"
-        if self.sessions_dir.is_dir():
-            found = [p for p in self.sessions_dir.rglob("rollout-*.jsonl") if p.stat().st_mtime >= started - 1]
-            ids = {m[1] for p in found if (m := re.search("(" + UUID + r")\.jsonl$", p.name))}
-            if len(ids) == 1:
-                return ids.pop(), "rollout_file"
-        return None, None
+    def _preflight(self, env, cwd):
+        found = self.which(self.executable)
+        if not found:
+            raise AdapterError("Install the official Codex CLI for auto_send; no API fallback")
+        executable = str(Path(found).resolve())
+        code, out, _ = self.runner([executable, "--version"], cwd=cwd, env=env, timeout=15)
+        version = re.search(r"\b(\d+\.\d+\.\d+)\b", out or "")
+        if code or not version or version[1] not in ACCEPTED_VERSIONS:
+            raise AdapterError("Codex client version is not qualified; nothing sent")
+        code, out, err = self.runner([executable, "login", "status"], cwd=cwd, env=env, timeout=15)
+        if code or "chatgpt" not in (out + err).lower():
+            raise AdapterError("Codex ChatGPT login required; API/unknown authentication refused; nothing sent")
+        return executable, version[1]
 
     def _auto_send(self, prompt):
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_PROMPT_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
-        if prompt.startswith("-"):
-            raise AdapterError("Prompt may not start with '-' (would be read as a CLI option)")
-        sandbox, overrides = sandbox_for(self.policy)
-        found = self.which(self.executable)
-        if not found:
-            raise AdapterError("Install the official Codex CLI for auto_send; no API fallback")
-        executable = str(Path(found).resolve())
-        with tempfile.TemporaryDirectory(prefix="connector-codex-app-") as directory:
-            root = Path(directory)
-            env = client_environment("codex", Path.home(), self.sessions_dir.parent)
-            for key in ("APPDATA", "LOCALAPPDATA", "USERPROFILE"):
-                if key in os.environ:
-                    env[key] = os.environ[key]
-            code, out, _ = self.runner([executable, "--version"], cwd=root, env=env, timeout=15)
-            version = re.search(r"\b(\d+\.\d+\.\d+)\b", out or "")
-            if code or not version or version[1] not in ACCEPTED_VERSIONS:
-                raise AdapterError("Codex client version is not qualified; nothing sent")
-            code, out, err = self.runner([executable, "login", "status"], cwd=root, env=env, timeout=15)
-            if code or "chatgpt" not in (out + err).lower():
-                raise AdapterError("Codex ChatGPT login required; API/unknown authentication refused; nothing sent")
-            output = root / "return.md"
-            argv = [executable, "exec", "--skip-git-repo-check", "-s", sandbox, "-o", str(output)]
-            for key, value in overrides.items():
-                argv += ["-c", key + "=" + json.dumps(value)]
-            if self.workspace:
-                argv += ["-C", self.workspace]
-            argv.append(prompt)
-            started = time.time()
-            code, out, err = self.runner(argv, cwd=self.workspace or root, env=env, timeout=self.timeout)
-            if code:
-                # Do not open the app, retry, or switch to prefill/API on failure.
-                raise AdapterError(f"codex_app auto_send: Codex CLI exit {code}; nothing opened, no fallback")
-            reply = output.read_text() if output.is_file() else ""
-        session, source = self._session_id(out, err, started)
-        result = {"provider": self.provider, "mode": "auto_send", "sandbox": sandbox,
-                  "client_version": version[1], "executed": True, "reply_text": reply,
-                  "text_provenance": "model_claim", "session_id": session, "session_id_source": source}
-        if session is None:
-            result.update(status="sent_session_unknown", app_thread_opened=False, link=None,
-                          delivery="sent via Codex CLI; session id not found, app thread not opened")
-            return result
-        link = thread_link(session)
+        workspace = require_workspace(self.workspace)
+        sandbox = sandbox_for(self.policy)
+        env = client_env(self.codex_home)  # refuses API key/base URL overrides
+        executable, version = self._preflight(env, workspace)
+        deadline = time.monotonic() + self.timeout
+        try:
+            process = self.spawner([executable, "app-server"], cwd=workspace, env=env)
+        except OSError:
+            raise AdapterError("codex app-server could not start; nothing sent, no fallback") from None
+        session = AppServerSession(process)
+        deltas, finals, turn = [], [], {}
+
+        def collect(message):
+            method, params = message.get("method"), message.get("params") or {}
+            if method == "item/agentMessage/delta" and isinstance(params.get("delta"), str):
+                deltas.append(params["delta"])
+            elif method == "item/completed":
+                item = params.get("item") or {}
+                if item.get("type") == "agentMessage" and isinstance(item.get("text"), str):
+                    finals.append(item["text"])
+            elif method == "turn/completed":
+                turn["completed"] = params.get("turn") or {}
+
+        thread_id = None
+        try:
+            try:
+                session.call(0, "initialize", {"clientInfo": CLIENT_INFO}, deadline, collect)
+                session.send({"method": "initialized", "params": {}})
+                started = session.call(1, "thread/start", {"cwd": workspace, "sandbox": sandbox,
+                                                           "approvalPolicy": "never"}, deadline, collect)
+                thread_id = (started.get("thread") or {}).get("id") or started.get("threadId")
+                if not isinstance(thread_id, str) or not re.fullmatch(UUID, thread_id):
+                    raise AdapterError("codex app-server returned no thread id; nothing opened, no fallback")
+                session.call(2, "turn/start", {"threadId": thread_id,
+                                               "input": [{"type": "text", "text": prompt}]}, deadline, collect)
+            except (TimeoutError, EOFError, OSError):
+                raise AdapterError("codex app-server did not accept the message; nothing opened, no fallback") from None
+            # The turn is accepted: the message is in the thread. Wait for completion.
+            try:
+                while "completed" not in turn:
+                    collect(session.next(deadline))
+                completion = "completed"
+            except TimeoutError:
+                completion = "timeout"
+            except EOFError:
+                completion = "server_exited"
+        finally:
+            session.close()
+        turn_status = turn.get("completed", {}).get("status") if completion == "completed" else None
+        if completion == "completed" and turn_status == "failed":
+            raise AdapterError("Codex turn failed; nothing opened, no fallback")
+        link = thread_link(thread_id)
         self.opener(link)
-        result.update(status="sent", app_thread_opened=True, link=link,
-                      delivery="sent via Codex CLI; app asked to open thread (visibility in app not verified)")
-        return result
+        status = "sent" if completion == "completed" else "sent_completion_unknown"
+        return {"status": status, "provider": self.provider, "mode": "auto_send", "sandbox": sandbox,
+                "client_version": version, "executed": True, "thread_id": thread_id, "link": link,
+                "app_thread_opened": True, "completion": completion, "turn_status": turn_status,
+                "reply_text": finals[-1] if finals else "".join(deltas), "text_provenance": "model_claim",
+                "delivery": "sent via codex app-server; app asked to open the thread" + (
+                    "" if completion == "completed" else "; reply completion not observed")}
 
     def deliver(self, prompt):
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)
