@@ -1,0 +1,105 @@
+{
+  "date": "2026-10-23",
+  "version": "0.2.0",
+  "installed_site_packages": true,
+  "providers": [
+    {
+      "provider": "claude",
+      "checks": [
+        {
+          "choice": "allow",
+          "result": "executed",
+          "file_created": true
+        },
+        {
+          "choice": "deny",
+          "result": "denied",
+          "file_created": false
+        },
+        {
+          "choice": "ask",
+          "result": "denied",
+          "file_created": false
+        }
+      ],
+      "status": "PASS",
+      "transport": [
+        {
+          "provider": "claude",
+          "client_version": "2.1.246",
+          "process_exit": 0,
+          "fresh_session": true
+        }
+      ]
+    },
+    {
+      "provider": "codex",
+      "checks": [
+        {
+          "choice": "allow",
+          "result": "executed",
+          "file_created": true
+        },
+        {
+          "choice": "deny",
+          "result": "denied",
+          "file_created": false
+        },
+        {
+          "choice": "ask",
+          "result": "denied",
+          "file_created": false
+        }
+      ],
+      "status": "PASS",
+      "transport": [
+        {
+          "provider": "codex",
+          "client_version": "0.153.4",
+          "process_exit": 0,
+          "fresh_session": true
+        }
+      ]
+    },
+    {
+      "provider": "supergrok_cli",
+      "checks": [
+        {
+          "choice": "allow",
+          "result": "executed",
+          "file_created": true
+        },
+        {
+          "choice": "deny",
+          "result": "denied",
+          "file_created": false
+        },
+        {
+          "choice": "ask",
+          "result": "denied",
+          "file_created": false
+        }
+      ],
+      "status": "PASS",
+      "transport": [
+        {
+          "provider": "supergrok_cli",
+          "client_version": "1.0.13",
+          "process_exit": 0,
+          "fresh_session": true
+        }
+      ]
+    }
+  ],
+  "runtime_source_sha256": {
+    "runner.py": "8408d16abab74f33e8f255518438a36eed986b195e236f42bd1dd3b56a107b2e",
+    "protocol.py": "e8b377fc6e3e93d1cf9ecaa5dce8c852709aceac758d48be8cc03abf746ca3d0",
+    "__init__.py": "3956fac1ac0b6870b1487c96fdb21dd38bd8a9c3949970e6d5b3f777f2a1906f",
+    "cli.py": "cf1b735c33657880997a7295263fa8780ebfeae4425caf73d6927dcef00cb9b9",
+    "permissions.py": "61cb2658bc1fe6b8d53edeee2b6c00aaa3cc1abf9fa879788dae382afac30619",
+    "process.py": "21759d2ba67061b1059d5d1aeb1e3319b3125bb6ed39cd760914b482cbc0eec6",
+    "broker.py": "091b684f47a1e8efc4afc134fbbee55eafaccf53c6e4164fa68da92604f2ed38",
+    "__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "adapters.py": "9d32d3e7ef53ec498fde2f89c445a7ddb6e75c6f6638af542bcb9d8e205dbf2e"
+  }
+}

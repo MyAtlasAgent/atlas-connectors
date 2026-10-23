@@ -1,5 +1,5 @@
 {
-  "package_status": "SOURCE_EXTRACTION_PREVIEW",
+  "package_status": "HISTORICAL_REFERENCE_SNAPSHOTS",
   "source_revision": "138fed3bd3bf0738f6c5eee8b35814facd0ef429",
   "source_state": "Pinned main snapshot; not PR 282 and not installed-runtime attestation",
   "files": [

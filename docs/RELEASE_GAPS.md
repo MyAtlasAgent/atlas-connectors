@@ -1,37 +1,20 @@
-# Release gaps
+# Version 0.2 boundaries
 
-This is an extraction candidate for an engineer to inspect. These gaps prevent
-presenting it as a portable live connector library:
+Implemented: standalone installation, official login command, fresh CLI sessions,
+one user policy, strict structured requests and actual bounded file enforcement.
 
-- Extract the actual transport implementations into importable modules without
-  the full dispatcher's configuration reads, scheduler, authority or top-level
-  execution. Keep the reference snapshots as evidence of the donor code.
-- Replace host-specific paths through a documented configuration boundary.
-  Redacted paths in the reading copies are placeholders, not working defaults.
-- Establish the source owner and accepted lineage of `grok-return-validate`.
-  Its current SHA check can write a BLOCKED return while exiting zero. Its PR
-  mismatch path adds a comment rather than enforcing exact PR identity. Its
-  `--worktree` check is optional. These limits must be addressed or constrained
-  explicitly before using it for authoritative admission.
-- Decide and test one public return contract, identity/session semantics,
-  cancellation, timeout/unknown outcomes and duplicate suppression across routes.
-  Current per-route scripts do not yet implement the proposed unified envelope.
-- Revalidate supported provider CLI versions and permission behavior with each
-  user's authorized account. No provider command or subscription probe was run
-  while preparing this package. Never silently switch to billable API access.
-- Codex needs an independently portable endpoint beyond generic command assembly.
-- Shared user permission selection and configuration parity are implemented.
-  Translate that policy into each live adapter and prove equivalent enforcement.
-  Historical installed routes still differ; [the permission guide](PERMISSIONS.md)
-  separates the new configuration standard from the remaining enforcement gaps.
-- Grok Bot desktop has a documented manual path, not an extracted automatic
-  connector. Keep it experimental/manual unless real owned source is supplied.
-- Preserve one owner for custody/lifecycle. A portable adapter must not inherit
-  Atlas merge, install, reviewer or grant authority from a caller label.
-- Keep source provenance and content checks current as files are added. The
-  Principal selected MIT and authorized the separate public repository;
-  the license file is included.
+Remaining:
 
-The Principal authorized the portable shared-preference implementation in this
-repository. Installation into Atlas, live dispatcher changes and connector
-cutover remain separate from this source preview.
+- Executors for arbitrary commands, network workload tools, Git and installation
+  effects. Until enforceable, these requests explicitly refuse.
+- Automatic Grok Bot desktop integration; retain its separate manual route.
+- Windows support; directory-descriptor enforcement is POSIX only.
+- Qualification of additional client versions and OS combinations.
+- First-time new-account onboarding on a clean workstation. Existing logins with
+  fresh conversations are a distinct result, recorded in VALIDATION.md.
+- Independent adversarial assessment beyond this release's bounded checks.
+  Vendor clients and host administrators are trusted; this is not OS isolation.
+- Durable cross-process custody/idempotency and long-running resumable agents.
+
+Historical Atlas source and installed Atlas runtime permissions remain separate.
+They are not invoked, installed or migrated by this package.

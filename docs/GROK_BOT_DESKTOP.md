@@ -8,6 +8,11 @@ An Atlas-owned automatic desktop connector was not located in the inspected
 pinned Atlas sources and operator tools. The existing documented route is manual
 delivery; this section includes that contract without presenting it as an SDK.
 
+The standalone CLI explicitly refuses `grok_bot_desktop` automation. The shared
+broker cannot govern actions the app performs independently. Use the separate
+SuperGrok CLI transport when you want the bounded live runtime; that selection
+is explicit and does not claim to automate or identify the desktop app.
+
 ## Manual handoff
 
 1. Prepare a scoped packet with mission ID, exact candidate SHA, requested work,

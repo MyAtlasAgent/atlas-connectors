@@ -1,7 +1,8 @@
 """One user permission preference, independent of provider.
 
 This module resolves configuration. A preference is not an authority grant or a
-claim that a vendor client enforces it. No provider process is launched here.
+claim that a vendor client enforces it. The standalone broker enforces supported
+actions after resolving this preference. No provider process is launched here.
 """
 from __future__ import annotations
 
@@ -119,7 +120,8 @@ def load_configuration(path):
     routes = {}
     for name, raw_route in providers.items():
         route = _object(raw_route, name)
-        if set(route) - {"prompt_mode", "cmd", "transport", "automatic_connector"}:
+        if set(route) - {"prompt_mode", "cmd", "transport", "automatic_connector",
+                         "executable", "model", "auth_directory", "timeout"}:
             raise ConfigurationError(f"{name}: provider-specific permission/configuration override refused")
         cmd = route.get("cmd")
         if cmd is not None:

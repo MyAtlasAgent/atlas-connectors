@@ -1,0 +1,26 @@
+name: Standalone package
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ['3.11', '3.12']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install .
+      - run: python -B -m unittest discover -s tests -v
+      - name: Installed CLI outside the source tree
+        shell: bash
+        run: |
+          clean_dir=$(mktemp -d)
+          cd "$clean_dir"
+          python -I -m atlas_connectors init
+          python -I -c "import atlas_connectors; assert 'site-packages' in atlas_connectors.__file__"

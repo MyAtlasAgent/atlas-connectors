@@ -11,3 +11,9 @@ credentials.json
 *.log
 .venv/
 dist/
+build/
+*.egg-info/
+connector-config/
+test-config/
+new-account/
+logins/

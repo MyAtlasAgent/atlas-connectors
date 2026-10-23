@@ -1,0 +1,207 @@
+{
+  "date": "2026-10-23",
+  "installed_package": "0.2.0",
+  "python": "3.12.14",
+  "source_tree_on_import_path": false,
+  "providers": [
+    {
+      "provider": "claude",
+      "permissions": {
+        "provider": "claude",
+        "checks": [
+          {
+            "preference": "allow",
+            "tool_status": "executed",
+            "file_created": true
+          },
+          {
+            "preference": "deny",
+            "tool_status": "denied",
+            "file_created": false
+          },
+          {
+            "preference": "ask",
+            "tool_status": "denied",
+            "file_created": false
+          }
+        ],
+        "transport": [
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "claude",
+            "client_version": "2.1.246",
+            "process_exit": 0,
+            "fresh_session": true
+          }
+        ],
+        "scope": "fresh subscription conversations; existing login; no Atlas dependency"
+      },
+      "native_canary_unchanged": true,
+      "bounded_run_returned": true,
+      "bounded_run_file_verified": true,
+      "status": "PASS"
+    },
+    {
+      "provider": "codex",
+      "permissions": {
+        "provider": "codex",
+        "checks": [
+          {
+            "preference": "allow",
+            "tool_status": "executed",
+            "file_created": true
+          },
+          {
+            "preference": "deny",
+            "tool_status": "denied",
+            "file_created": false
+          },
+          {
+            "preference": "ask",
+            "tool_status": "denied",
+            "file_created": false
+          }
+        ],
+        "transport": [
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "codex",
+            "client_version": "0.153.4",
+            "process_exit": 0,
+            "fresh_session": true
+          }
+        ],
+        "scope": "fresh subscription conversations; existing login; no Atlas dependency"
+      },
+      "native_canary_unchanged": true,
+      "bounded_run_returned": true,
+      "bounded_run_file_verified": true,
+      "status": "PASS"
+    },
+    {
+      "provider": "supergrok_cli",
+      "permissions": {
+        "provider": "supergrok_cli",
+        "checks": [
+          {
+            "preference": "allow",
+            "tool_status": "executed",
+            "file_created": true
+          },
+          {
+            "preference": "deny",
+            "tool_status": "denied",
+            "file_created": false
+          },
+          {
+            "preference": "ask",
+            "tool_status": "denied",
+            "file_created": false
+          }
+        ],
+        "transport": [
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          },
+          {
+            "provider": "supergrok_cli",
+            "client_version": "1.0.13",
+            "process_exit": 0,
+            "fresh_session": true
+          }
+        ],
+        "scope": "fresh subscription conversations; existing login; no Atlas dependency"
+      },
+      "native_canary_unchanged": true,
+      "bounded_run_returned": true,
+      "bounded_run_file_verified": true,
+      "status": "PASS"
+    }
+  ],
+  "new_account_onboarding": "PENDING_USER_ACCOUNT"
+}

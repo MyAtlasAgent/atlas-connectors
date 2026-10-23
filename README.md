@@ -1,73 +1,139 @@
 # Atlas Connectors
 
-An engineering preview of the transport code Atlas uses to hand scoped work to
-Claude Code, Codex and Grok, and collect their returns. MIT licensed.
+Standalone **Claude Code, Codex and SuperGrok CLI** connections, using your own
+subscription logins and one shared user permission policy. **No Atlas installation
+is required.** MIT licensed. Version 0.2 is an early filesystem-tool release.
 
-**Status: source extraction preview; not yet a standalone live connector SDK.**
-The implementation is currently distributed across Atlas. This
-repository makes that boundary inspectable without sharing the full system.
+## Requirements
 
-## Start here
+Python 3.11/3.12 on macOS or Linux, plus each official provider client you want
+to use, installed separately on PATH and authenticated with your own supported
+subscription. There is no API-key fallback and no runtime Python dependency.
+
+| Connection | Executable | Client version currently accepted |
+| --- | --- | --- |
+| Claude Code | `claude` | `2.1.246` |
+| Codex | `codex` | `0.153.4` |
+| SuperGrok CLI | `grok` | `1.0.13` |
+
+Other client versions are refused pending qualification because native controls
+change. `doctor` checks version; `smoke` tests actual connectivity/permissions.
+See [validation evidence](VALIDATION.md) for observed results and limitations.
+
+Official installers: [Claude Code](https://code.claude.com/docs/en/setup),
+[Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
+[Grok Build](https://docs.x.ai/build).
+
+## Install and connect
 
 ```sh
 git clone https://github.com/MyAtlasAgent/atlas-connectors.git
 cd atlas-connectors
-python3 -B examples/offline_walkthrough.py
+python3.12 -m venv .venv
+. .venv/bin/activate
+python -m pip install .
+atlas-connectors init connector-config
 ```
 
-1. Read [the architecture and route map](docs/ARCHITECTURE.md).
-2. Run `python3 -B examples/offline_walkthrough.py` (Python 3.11+, standard library).
-3. Inspect the actual source under `reference/` and its provenance in
-   [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json).
-4. Read [the release gaps](docs/RELEASE_GAPS.md) before integrating it.
+Once installed, commands work outside this checkout. No Atlas source, database,
+dispatcher, account registry or background service is needed.
 
-**Permissions are a shared user preference.** Edit
-[`examples/permissions.json`](examples/permissions.json) once for all providers.
-Choose `allow`, `ask` or `deny` per capability; unspecified capabilities inherit
-the user's shared default (`ask` in the example). Provider-specific permission
-overrides are rejected by the configuration loader. See [setup and enforcement
-limits](docs/PERMISSIONS.md). Live provider enforcement is not implemented in
-this source preview.
+Sign in through the official client, skipping providers you do not use:
 
-The walkthrough runs selected existing command-building and return-validation
-functions against synthetic fixtures. It starts no provider, reads no provider
-login, and uses a temporary directory for its output. It is a demonstration of
-the extracted code, not an end-to-end Atlas execution or provider qualification.
+```sh
+atlas-connectors login claude
+atlas-connectors login codex
+atlas-connectors login supergrok_cli
+atlas-connectors doctor codex
+atlas-connectors smoke codex
+```
 
-## Routes
+Login is interactive; only the vendor client handles credentials. Existing
+logins can be reused. To test a new account in separate profiles, initialize
+with `atlas-connectors init test-config --isolated-logins` and pass
+`--config test-config/connectors.json` to subsequent commands. Never commit
+these login directories. Initialization refuses to overwrite existing files.
 
-| Route | Included material | Current boundary |
-| --- | --- | --- |
-| Claude Code | Command builder, durable-session helpers, Courier endpoint, permission and telemetry code | Courier and the legacy dispatcher are distinct existing paths; not newly unified here |
-| Codex | Shared command builder and user-controlled permission configuration | Uses stdout/output-file return transport; no independent Codex SDK extracted |
-| SuperGrok CLI | Existing launcher and return validator | Launcher depends on Atlas registration, permission, custody and return-ingestion services |
-| Grok Bot desktop | Separate [manual handoff contract](docs/GROK_BOT_DESKTOP.md) and synthetic packet | An Atlas-owned automatic desktop connector was not found in the inspected sources |
+## Choose permissions once
 
-Operators return through Atlas; this is not peer-to-peer bot messaging. Transport
-delivery, operator receipt, returned findings, independent acceptance and a
-verified external effect are different observations.
+Edit `connector-config/permissions.json`. Initially every action asks. For
+automatic file reads/writes in an entrusted workspace, for example:
 
-## Source and scope
+```json
+{
+  "version": 1,
+  "default": "deny",
+  "capabilities": {
+    "read_files": "allow",
+    "write_files": "allow"
+  }
+}
+```
 
-Repository source is pinned to Atlas commit
-`138fed3bd3bf0738f6c5eee8b35814facd0ef429`. The Grok return validator is a
-separately identified installed-file snapshot with unverified source lineage.
-This package does not claim to represent the current installed system or the
-moving Milestone A integration root.
+The same policy applies to every provider. `allow` executes a supported action,
+`deny` refuses it, and `ask` requires a per-request terminal approval. In
+unattended/non-TTY runs, ask refuses. Model output cannot provide approval.
+Provider-specific permission overrides are rejected.
 
-Reference files have `.txt` suffixes intentionally: they are source for reading,
-not drop-in launch scripts. Local paths and email addresses are replaced with
-placeholders; the manifest records source and packaged hashes. Configuration and
-packets in `examples/` are newly authored synthetic examples, not account exports.
+## Run a task
 
-No provider binaries, credentials, browser sessions, operational databases,
-transcripts, runtime logs, real account registry or Git history are included.
-Each user supplies their own supported provider client and login if a future
-release supports live execution. MIT covers the Atlas material in this package,
-not third-party software, subscriptions or service access.
+```sh
+mkdir -p demo-workspace
+atlas-connectors run codex 'Write hello.txt containing Hello' --workspace demo-workspace
+atlas-connectors run claude 'Read hello.txt and explain it' --workspace demo-workspace
+atlas-connectors run supergrok_cli 'List the files' --workspace demo-workspace
+```
 
-## Standalone library roadmap
+Use `--config PATH` for another shared configuration and `--max-turns N` to
+bound a run (default 8, maximum 32). Optional per-provider settings are `model`,
+`executable`, `auth_directory` and `timeout`; permissions stay shared. Client
+failure/timeout/quota never triggers automatic retry or provider/API fallback.
 
-This preview is ready for source inspection. A standalone live release still
-needs the portability and contract work listed in `docs/RELEASE_GAPS.md`.
-The offline walkthrough is the supported runnable example in this version.
+The clients run as constrained reasoning transports in fresh conversations.
+They return structured requests; this package's broker checks the user policy
+before performing supported effects.
+
+| Action in 0.2 | Enforcement |
+| --- | --- |
+| Read/list files | `read_files`, inside workspace |
+| Write files | `write_files`, bounded atomic replacement inside workspace |
+| Credential-like workspace paths | Additional `read_credentials` choice |
+| Shell, network fetch, Git, merge/install, external MCP | Explicitly unsupported even when allowed; no unrestricted fallback |
+| Grok Bot desktop | Separate manual route; automatic execution refused |
+
+Parent directories must exist. Files are limited to 64 KiB. Git metadata,
+connector configuration, login directories and runtime files are protected.
+Directory-descriptor checks refuse symlink traversal; replacement avoids
+truncating external hardlink targets. Credential filename checks are conservative,
+not content-based DLP. See [permission boundaries](docs/PERMISSIONS.md).
+
+Output separates mechanical tool results from the final model claim. `returned`
+means an answer arrived, not every action succeeded: inspect `tools` statuses.
+The network permission controls workload actions; provider login/inference
+necessarily uses network access when you invoke a live connection.
+
+## Test without Atlas
+
+```sh
+python -m unittest discover -s tests -v
+atlas-connectors smoke claude
+atlas-connectors smoke codex
+atlas-connectors smoke supergrok_cli
+```
+
+Offline tests need no login. Each smoke command consumes subscription quota in
+three fresh conversations and checks actual allow/deny/unattended-ask file
+effects in a disposable workspace. A greeting alone is not a permission test.
+See [clean installation and new-account tests](docs/TESTING.md).
+
+## Trust and provenance
+
+Vendor binaries, authentication services and host administrator policy are
+trusted dependencies. This is not an OS-wide sandbox for malicious binaries or
+other apps. It cannot govern independent actions in a desktop app.
+
+Historical Atlas reading copies under `reference/` are non-executable and are
+not imported or included in the Python wheel. Their hashes remain in
+`SOURCE_MANIFEST.json`. See [architecture](docs/ARCHITECTURE.md),
+[desktop distinction](docs/GROK_BOT_DESKTOP.md) and
+[remaining limitations](docs/RELEASE_GAPS.md).
