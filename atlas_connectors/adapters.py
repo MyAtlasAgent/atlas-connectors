@@ -26,6 +26,35 @@ API_OVERRIDES = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", 
                  "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
                  "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
+# Only the overrides that could redirect THIS provider's billing are refused; others
+# are irrelevant to it and never reach the child (its environment is allowlisted).
+PROVIDER_OVERRIDES = {
+    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+               "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"),
+    "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "supergrok_cli": ("XAI_API_KEY",),
+}
+LOOPBACK = re.compile(r"^https?://(127\.\d+\.\d+\.\d+|localhost|\[::1\])(:\d+)?(/|$)", re.IGNORECASE)
+
+
+def billing_guard(provider, environ=None):
+    """Refuse API/billing overrides relevant to provider; return the names that are safely ignored.
+
+    Inside a Claude desktop Code session ANTHROPIC_BASE_URL points at the app's
+    loopback proxy. With no API key/token/cloud flag set, that is not API
+    billing; it is dropped from the child (allowlisted env) and the child's own
+    subscription login is verified with ``claude auth status`` before sending.
+    """
+    environ = os.environ if environ is None else environ
+    relevant = PROVIDER_OVERRIDES.get(provider, API_OVERRIDES)
+    present = [key for key in relevant if environ.get(key)]
+    if provider == "claude" and present == ["ANTHROPIC_BASE_URL"] and LOOPBACK.match(environ["ANTHROPIC_BASE_URL"]):
+        return ["ANTHROPIC_BASE_URL (local Claude app proxy)"]
+    if present:
+        raise AdapterError(f"API/billing override present ({', '.join(present)}); subscription-only route refuses it. "
+                           "Unset it, or run from a terminal without it.")
+    return [key for key in API_OVERRIDES if key not in relevant and environ.get(key)]
+
 
 class AdapterError(RuntimeError):
     pass
@@ -46,8 +75,7 @@ def failure_category(stdout, stderr):
 
 def client_environment(provider, home, auth_root, *, default_claude_login=False):
     # Never fall back from subscription login to API or marketplace billing.
-    if any(os.environ.get(key) for key in API_OVERRIDES):
-        raise AdapterError("API/billing override present; subscription-only adapter refuses it")
+    billing_guard(provider)
     env = {key: os.environ[key] for key in INHERIT if key in os.environ}
     # Claude's default macOS Keychain namespace changes when CONFIG_DIR is set,
     # even to its usual directory. Preserve that supported auth path; safe-mode,
@@ -105,7 +133,15 @@ class CLIAdapter:
                 login = auth / "auth.json"
                 if not login.is_file():
                     raise AdapterError("Grok login unavailable: run grok login first")
-                (isolated / "auth.json").symlink_to(login)
+                try:
+                    (isolated / "auth.json").symlink_to(login)
+                except OSError:
+                    # Windows without Developer Mode cannot symlink; a hard link keeps one shared file.
+                    try:
+                        os.link(login, isolated / "auth.json")
+                    except OSError:
+                        raise AdapterError("Could not link the Grok login into the isolated client directory "
+                                           "(symlink and hard link both refused); nothing sent") from None
                 (isolated / "config.toml").write_text('[cli]\nauto_update = false\nuse_leader = false\n')
                 auth = isolated
             env = client_environment(self.provider, root, auth, default_claude_login=self.default_claude_login)

@@ -100,7 +100,10 @@ class SharedPermissions(unittest.TestCase):
         self.config["permission_policy"] = "../outside.json"
         with self.assertRaises(ConfigurationError):
             self.load()
-        (self.root / "linked.json").symlink_to(self.root.parent / "outside.json")
+        try:
+            (self.root / "linked.json").symlink_to(self.root.parent / "outside.json")
+        except OSError:
+            self.skipTest("creating symlinks needs Developer Mode/admin on Windows")
         self.config["permission_policy"] = "linked.json"
         with self.assertRaises(ConfigurationError):
             self.load()

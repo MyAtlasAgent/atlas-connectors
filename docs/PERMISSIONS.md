@@ -55,3 +55,29 @@ Official references: [Claude controls](https://code.claude.com/docs/en/cli-refer
 [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [Grok permissions](https://docs.x.ai/build/features/permissions),
 [Grok headless transport](https://docs.x.ai/build/cli/headless-scripting).
+
+## codex_app
+
+`codex_app` inherits the same shared policy (no provider override). auto_send
+passes `thread/start` a `sandbox` of `workspace-write` only when
+`write_files=allow`, otherwise `read-only`, with `approvalPolicy: "never"`;
+server approval requests are refused, never auto-approved; `read_files=deny`
+refuses. Codex may still run read-only commands inside its sandbox, and the
+user's normal Codex config applies. Effects are Codex-native, not brokered.
+`prefill` performs no effects until the user sends.
+
+`claude_app` inherits the same shared policy. auto_send maps it to
+`--permission-mode plan`, or `acceptEdits` only when `write_files=allow`;
+`bypassPermissions`/`dontAsk` are never used and `read_files=deny` refuses.
+Effects are Claude-native, not brokered. prefill performs no effects. A `folder` always triggers Claude's own
+confirmation dialog. Only `claude://` URLs are handed to the OS.
+
+
+## Peer mailbox
+
+Mailbox bodies are untrusted data. A received message is information, not an
+instruction or a permission grant, and never broadens the shared policy.
+Discovery reads no credential files and stores no secrets. `mail send --deliver`
+uses the recipient app route's normal auto_send under the same policy, framing
+the body as information from a peer. Sender names are not authenticated beyond
+being known provider names; any local process of this user can write the mailbox.

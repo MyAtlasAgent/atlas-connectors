@@ -8,19 +8,46 @@ import sys
 import tempfile
 
 from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, client_environment
+from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
+from .claude_app import ClaudeAppRoute, SURFACES
+from .converse import relay
+from . import sessions as sessionlib
+from .codex_app import require_workspace
+from . import peers as peerlib
+from . import workspaces as wslib
 from .broker import ToolBroker
-from .permissions import PermissionPolicy, load_configuration
+from .permissions import PROVIDERS, PermissionPolicy, load_configuration
 from .protocol import INSTRUCTIONS, parse
 from .runner import run
 
 
-def initialize(directory, isolated=False):
+def default_config_path():
+    """./connector-config if present (repo checkouts), else the per-user data folder."""
+    local = Path("connector-config") / "connectors.json"
+    if local.exists():
+        return local
+    from .peers import data_dir  # noqa: PLC0415
+    return data_dir() / "config" / "connectors.json"
+
+
+def initialize(directory, isolated=False, workspace=None):
     root = Path(directory).resolve()
     destinations = [root / "connectors.json", root / "permissions.json"]
     if any(path.exists() for path in destinations):
         raise ValueError("Configuration already exists; no files overwritten")
+    if workspace is not None:
+        workspace = Path(workspace)
+        if not workspace.is_absolute() or not workspace.is_dir():
+            raise ValueError("--workspace must be an absolute existing directory")
+        workspace = str(workspace.resolve())
     root.mkdir(parents=True, exist_ok=True)
-    providers = {}
+    # New users default to the Codex desktop app on their ChatGPT login.
+    providers = {DEFAULT_PROVIDER: {"transport": "codex_app", "mode": DEFAULT_MODE, "executable": "codex"},
+                 "claude_app": {"transport": "claude_app", "mode": "auto_send", "surface": "code",
+                                "executable": "claude"}}
+    if workspace is not None:
+        for name in (DEFAULT_PROVIDER, "claude_app"):
+            providers[name]["workspace"] = workspace
     for name, binary in BINARIES.items():
         route = {"transport": "subscription_cli", "executable": binary}
         if isolated:
@@ -39,6 +66,51 @@ def adapter_for(configuration, provider):
     if route.get("transport") != "subscription_cli":
         raise AdapterError("Selected route is not a standalone subscription CLI; no transport substitution")
     return CLIAdapter(provider, **{key: route[key] for key in ("executable", "model", "auth_directory", "timeout") if key in route})
+
+
+def route_for(configuration, provider=DEFAULT_PROVIDER, *, mode=None, workspace=None, runner=None, opener=None,
+              surface=None):
+    """Build a desktop-app route; refuses other providers instead of substituting."""
+    route = configuration.providers.get(provider)
+    if route is None:
+        raise AdapterError("Provider is not configured")
+    if route.get("transport") == "claude_app":
+        return ClaudeAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", "auto_send"),
+                              surface=surface or route.get("surface", "code"),
+                              folder=(workspace or route.get("folder")) if (mode or route.get("mode")) == "prefill" else route.get("folder"),
+                              workspace=workspace or route.get("workspace"), opener=opener,
+                              executable=route.get("executable", "claude"),
+                              timeout=route.get("timeout", 300), runner=runner)
+    if route.get("transport") != "codex_app":
+        raise AdapterError("Selected route is not codex_app; use `run` for CLI providers; no substitution")
+    return CodexAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", DEFAULT_MODE),
+                         executable=route.get("executable", "codex"),
+                         workspace=workspace or route.get("workspace"),
+                         timeout=route.get("timeout", 300), runner=runner, opener=opener)
+
+
+def peer_command(args, *, detector=None, route_factory=None):
+    root = Path(args.data_dir) if getattr(args, "data_dir", None) else None
+    if args.command == "peers":
+        return (detector or peerlib.detect)(root=root)
+    if args.command == "register":
+        detected = (detector or peerlib.detect)(root=root).get(args.provider, {})
+        return peerlib.register(args.provider, root=root, routes=detected.get("routes") or None)
+    if args.mail_command == "inbox":
+        return peerlib.inbox(args.provider, root=root, mark_read=args.mark_read)
+    if args.mail_command == "reply":
+        return peerlib.reply(args.sender, args.message_id, args.body, root=root)
+    if args.deliver and args.recipient not in peerlib.DELIVERABLE:
+        raise ValueError(f"{args.recipient} is mailbox-only; --deliver supports {', '.join(peerlib.DELIVERABLE)}")
+    message = peerlib.send(args.sender, args.recipient, args.body, root=root)
+    result = {"status": "queued", "message": message}
+    if args.deliver:
+        # Uses the recipient's normal auto_send route and the user's shared policy, unchanged.
+        factory = route_factory or (lambda: route_for(load_configuration(args.config), args.recipient,
+                                                       mode="auto_send", workspace=args.workspace))
+        result["delivery"] = factory().deliver(peerlib.delivery_prompt(message))
+        result["status"] = result["delivery"]["status"]
+    return result
 
 
 def terminal_approval(capability, request):
@@ -73,23 +145,212 @@ def smoke(adapter):
 
 
 def main(argv=None):
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # Windows consoles/pipes default to a legacy code page
+        except (AttributeError, ValueError):
+            pass
     parser = argparse.ArgumentParser(prog="atlas-connectors")
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
-    init.add_argument("directory", nargs="?", default="connector-config")
+    init.add_argument("directory", nargs="?", default=None)
     init.add_argument("--isolated-logins", action="store_true")
+    init.add_argument("--peer-instructions", action="store_true",
+                      help="print a CLAUDE.md/AGENTS.md snippet about peers and mail; writes nothing")
+    init.add_argument("--workspace", help="absolute project directory used by auto_send (default: current directory)")
+    send = commands.add_parser("send", help="default route: deliver a prompt to the Codex desktop app")
+    send.add_argument("prompt")
+    send.add_argument("--provider", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
+    send.add_argument("--mode", choices=MODES, help="auto_send (default, sends via the official CLI) or prefill (explicit opt-in; user presses Send)")
+    send.add_argument("--workspace", help="absolute project directory; overrides config `workspace`, else the current directory")
+    send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
+    send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
+    send.add_argument("--config", default=None)
+    send.add_argument("--new-session", action="store_true", help="start a fresh session instead of continuing the saved one")
+    send.add_argument("--session", help="continue this specific session/thread id (saved as the current one)")
+    send.add_argument("--open", action="store_true",
+                      help="codex_app: also open the thread in the app (it then locks the thread until the app restarts)")
+    send.add_argument("--no-open", action="store_true", help="claude_app: do not open the session in the desktop app")
+    send.add_argument("--data-dir", default=None)
+    for name, rounds, text in (("converse", 3, "Codex and Claude talk to each other, each in its own saved app session"),
+                               ("solve", 6, "Codex and Claude collaborate on your problem until they agree on a FINAL ANSWER")):
+        conv = commands.add_parser(name, help=text)
+        conv.add_argument("prompt")
+        conv.add_argument("--rounds", type=int, default=rounds, help="each provider speaks once per round (1-10)")
+        conv.add_argument("--first", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
+        conv.add_argument("--workspace", help="absolute project directory (default: config, else current directory)")
+        conv.add_argument("--continue", dest="continue_pair", action="store_true",
+                          help="extend the last saved Codex+Claude pair instead of starting a new pair for this run "
+                               "(a Codex thread already opened in the app may be locked until the app restarts)")
+        conv.add_argument("--new-session", action="store_true", help="(default) start a new Codex+Claude pair")
+        conv.add_argument("--no-open", action="store_true", help="do not open the sessions in the desktop apps")
+        conv.add_argument("--json", action="store_true")
+        conv.add_argument("--config", default=None)
+        conv.add_argument("--data-dir", default=None)
+    sess = commands.add_parser("sessions", help="list or reset saved app sessions")
+    sess.add_argument("action", nargs="?", choices=["list", "reset", "open"], default="list")
+    sess.add_argument("--config", default=None)
+    sess.add_argument("--workspace", default=None)
+    sess.add_argument("provider", nargs="?", choices=list(sessionlib.PROVIDERS))
+    sess.add_argument("--data-dir", default=None)
+    data = argparse.ArgumentParser(add_help=False)
+    data.add_argument("--data-dir", help="override the per-user atlas-connectors data directory")
+    peers = commands.add_parser("peers", parents=[data], help="detect local providers; sends nothing")
+    peers.add_argument("--json", action="store_true")
+    reg = commands.add_parser("register", parents=[data], help="record a provider in the local peer registry")
+    reg.add_argument("provider", choices=list(PROVIDERS))
+    mail = commands.add_parser("mail", help="local mailbox between providers")
+    mailcmd = mail.add_subparsers(dest="mail_command", required=True)
+    msend = mailcmd.add_parser("send", parents=[data])
+    msend.add_argument("--from", dest="sender", required=True, choices=list(PROVIDERS))
+    msend.add_argument("--to", dest="recipient", required=True, choices=list(PROVIDERS))
+    msend.add_argument("body")
+    msend.add_argument("--deliver", action="store_true", help="also auto_send into codex_app/claude_app")
+    msend.add_argument("--config", default=None)
+    msend.add_argument("--workspace")
+    minbox = mailcmd.add_parser("inbox", parents=[data])
+    minbox.add_argument("provider", choices=list(PROVIDERS))
+    minbox.add_argument("--mark-read", action="store_true")
+    mreply = mailcmd.add_parser("reply", parents=[data])
+    mreply.add_argument("--from", dest="sender", required=True, choices=list(PROVIDERS))
+    mreply.add_argument("message_id")
+    mreply.add_argument("body")
+    ws = commands.add_parser("workspace", help="shared folders where providers work together")
+    wscmd = ws.add_subparsers(dest="workspace_command", required=True)
+    wcreate = wscmd.add_parser("create", parents=[data])
+    wcreate.add_argument("name")
+    wcreate.add_argument("--base", help="parent directory (default: <Documents>/Atlas Workspaces)")
+    wcreate.add_argument("--exist-ok", action="store_true")
+    wcreate.add_argument("--set-default", action="store_true")
+    wcreate.add_argument("--with-agent-instructions", action="store_true",
+                         help="write CLAUDE.md and AGENTS.md inside the new folder only")
+    wcreate.add_argument("--config", default=None)
+    wscmd.add_parser("list", parents=[data])
+    wuse = wscmd.add_parser("use", parents=[data])
+    wuse.add_argument("name")
+    wuse.add_argument("--config", default=None)
     for command in ("doctor", "login", "run", "smoke"):
         sub = commands.add_parser(command)
         sub.add_argument("provider", choices=[*BINARIES, "grok_bot_desktop"])
-        sub.add_argument("--config", default="connector-config/connectors.json")
+        sub.add_argument("--config", default=None)
         if command == "run":
             sub.add_argument("prompt")
             sub.add_argument("--workspace", required=True)
             sub.add_argument("--max-turns", type=int, default=8)
     args = parser.parse_args(argv)
+    if getattr(args, "config", "unset") is None:
+        args.config = str(default_config_path())
+    if args.command == "init" and args.directory is None:
+        args.directory = str(default_config_path().parent)
     try:
+        if args.command == "init" and args.peer_instructions:
+            print(peerlib.PEER_INSTRUCTIONS, end="")
+            return 0
+        if args.command == "workspace":
+            root = Path(args.data_dir) if args.data_dir else None
+            if args.workspace_command == "create":
+                result = wslib.create(args.name, base=args.base, exist_ok=args.exist_ok,
+                                      with_agent_instructions=args.with_agent_instructions, root=root)
+                if args.set_default:
+                    result["routes_updated"] = wslib.set_default(args.config, result["path"])
+            elif args.workspace_command == "list":
+                result = wslib.registered(root)
+            else:
+                result = wslib.use(args.name, args.config, root)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0
+        if args.command in ("peers", "register", "mail"):
+            result = peer_command(args)
+            if args.command == "peers" and not args.json:
+                for name, entry in result.items():
+                    state = "present" if entry["present"] else "absent"
+                    routes = ", ".join(entry["routes"]) or "none"
+                    print(f"{name}: {state}; routes: {routes}" + (
+                        "; why not: " + "; ".join(entry["why_not"]) if entry["why_not"] else ""))
+                return 0
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if not isinstance(result, dict) or result.get("status") != "error" else 2
         if args.command == "init":
-            result = initialize(args.directory, args.isolated_logins)
+            result = initialize(args.directory, args.isolated_logins, args.workspace)
+        elif args.command == "sessions":
+            if args.action == "open":
+                configuration = load_configuration(args.config)
+                result = {}
+                for name in ([args.provider] if args.provider else list(sessionlib.PROVIDERS)):
+                    route = route_for(configuration, name, mode="auto_send", workspace=args.workspace)
+                    workspace = require_workspace(route.workspace)
+                    sid = sessionlib.get(name, workspace, args.data_dir)
+                    if not sid:
+                        result[name] = {"status": "no_saved_session", "workspace": workspace}
+                    elif name == "codex_app":
+                        route.opener(f"codex://threads/{sid}")
+                        result[name] = {"status": "opened", "session_id": sid, "link": f"codex://threads/{sid}",
+                                        "note": "the Codex app now holds this thread; further sends need an app restart or --new-session"}
+                    else:
+                        result[name] = {"status": route.handoff(sid), "session_id": sid, "workspace": workspace,
+                                        "where": "Claude desktop app > Code tab, folder " + Path(workspace).name}
+            else:
+                result = (sessionlib.reset(args.provider, args.data_dir) if args.action == "reset"
+                          else sessionlib.listing(args.data_dir))
+            print(json.dumps(result, indent=2))
+            return 0
+        elif args.command in ("converse", "solve"):
+            configuration = load_configuration(args.config)
+            routes = {name: route_for(configuration, name, mode="auto_send", workspace=args.workspace)
+                      for name in (DEFAULT_PROVIDER, "claude_app")}
+            workspace = require_workspace(routes[DEFAULT_PROVIDER].workspace)
+            saved = {name: sessionlib.get(name, workspace, args.data_dir) for name in routes} \
+                if args.continue_pair and not args.new_session else {}
+            first_line = next((line.strip() for line in args.prompt.splitlines() if line.strip()), "")
+            title = ("Solve: " if args.command == "solve" else "Converse: ") + first_line
+            result = relay(routes, args.prompt, rounds=args.rounds, first=args.first, sessions=saved,
+                           solve=args.command == "solve", open_apps=not args.no_open, title=title[:80])
+            if args.continue_pair:
+                result["warning"] = ("Continuing the saved pair; if the Codex app has this thread open it may be "
+                                     "locked until the app restarts (run without --continue for a new pair).")
+            for name, sid in result["sessions"].items():
+                if sid:
+                    sessionlib.save(name, workspace, sid, args.data_dir)
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                for entry in result["transcript"]:
+                    print(f"[round {entry['round']}] {entry['speaker']}:\n{entry['text']}\n")
+                print(f"status: {result['status']}" + (f" ({result['detail']})" if result.get("detail") else ""))
+                for name, sid in result["sessions"].items():
+                    print(f"{name} session: {sid}  {result['links'].get(name, '')}")
+                if "claude_app_handoff" in result:
+                    print(f"claude desktop handoff: {result['claude_app_handoff']}")
+                if args.command == "solve":
+                    print(f"resolved: {'yes' if result['resolved'] else 'no'} (rounds used: {result['rounds_used']}" + (f", agreed by {result['agreed_by']}" if result.get('agreed_by') else '') + ')')
+                    print(f"FINAL ANSWER ({result['final_answer_by']}):\n{result['final_answer']}")
+            return 0 if result["status"] == "completed" else 2
+        elif args.command == "send":
+            route = route_for(load_configuration(args.config), args.provider, mode=args.mode,
+                              workspace=args.workspace, surface=args.surface)
+            if args.preview:
+                result = {"status": "preview", "link": route.preview(args.prompt), "launched": False}
+            elif route.mode != "auto_send":
+                result = route.deliver(args.prompt)
+            else:
+                workspace = require_workspace(route.workspace)
+                current = args.session or (None if args.new_session else
+                                           sessionlib.get(args.provider, workspace, args.data_dir))
+                if args.provider == "claude_app":
+                    result = route.deliver(args.prompt, session_id=current, handoff=not args.no_open)
+                    sid = result.get("session_id")
+                else:
+                    result = route.deliver(args.prompt, thread_id=current, open_app=args.open)
+                    sid = result.get("thread_id")
+                    if not args.open:
+                        result["hint"] = (f"Open it in the Codex app with {result.get('link')} or rerun with --open. "
+                                          "Once open in the app, the thread is locked for further sends until the "
+                                          "app restarts; use --new-session then.")
+                if sid:
+                    sessionlib.save(args.provider, workspace, sid, args.data_dir)
+                result["session_reused"] = current is not None
+            print(json.dumps(result, indent=2))
+            return 0 if result["status"] in ("sent", "preview", "prefilled_awaiting_user_send") else 2
         else:
             configuration = load_configuration(args.config)
             adapter = adapter_for(configuration, args.provider)

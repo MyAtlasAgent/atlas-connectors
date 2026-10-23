@@ -25,3 +25,17 @@ actual broker effects are separate observations.
 This release supports file reads, listing and atomic writes. Other capabilities
 and desktop automation explicitly refuse. Historical reading copies under
 `reference/` are not imported or included in the installed wheel.
+
+`codex_app.py` is the default new-user route. `auto_send` drives `codex
+app-server` over stdio JSON-RPC (initialize, initialized, thread/start,
+turn/start, wait for turn/completed) and opens `codex://threads/<id>`.
+`claude_app.py` auto_send runs `claude -p` in the workspace and hands off with a
+detached `claude --desktop --resume <id>`. Both need a real workspace (flag,
+then config, then current directory; temp dirs refused). `prefill` (opt-in)
+opens `codex://threads/new?prompt=` or `claude://code/new?q=` and the user
+presses Send. Spawner, runner, launcher and opener are injectable; no mode falls
+back to another, to another provider or to API billing.
+
+`workspaces.py` creates shared folders (`<Documents>/Atlas Workspaces/<name>`),
+records them in the data directory's `workspaces.json` and can set one as the
+app routes' default `workspace`.

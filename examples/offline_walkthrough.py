@@ -11,6 +11,7 @@ import runpy
 import sys
 import tempfile
 from unittest.mock import patch
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -57,7 +58,7 @@ def main():
             assert configuration.permissions_for(provider) is configuration.policy
             assert all(configuration.permissions_for(provider).preference(capability) == "ask"
                        for capability in CAPABILITIES)
-        print("All four providers inherit the same user-selected permissions (example: ask)")
+        print("All six providers inherit the same user-selected permissions (example: ask)")
         for name in ("claude", "codex", "supergrok_cli"):
             command = context["build_cmd"](routes[name], str(packet), temporary, callsign="DEMO")
             assert command and "{prompt}" not in " ".join(command)
@@ -67,6 +68,49 @@ def main():
         assert len(receipts) == 3
         assert routes["grok_bot_desktop"]["cmd"] is None
         print("Grok Bot desktop: manual packet delivery, no automatic command")
+
+        from atlas_connectors.codex_app import CodexAppRoute, thread_link
+        opened = []
+        app = CodexAppRoute(configuration.permissions_for("codex_app"), mode=routes["codex_app"]["mode"],
+                            workspace=temporary, opener=opened.append,
+                            runner=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no launch")))
+        link = app.preview("Say hello & name your model?")
+        print("codex_app (default route, mode=" + app.mode + ") prefill opt-in link preview (not opened): "
+              + link.replace(quote(str(Path(temporary).resolve()), safe=""), "<TEMP>"))
+        from atlas_connectors.codex_app import sandbox_for
+        print("codex_app auto_send would run (not executed): codex app-server -> initialize, initialized, "
+              "thread/start{cwd:<workspace>, sandbox:" + sandbox_for(app.policy) + ", approvalPolicy:never}, "
+              "turn/start, wait turn/completed")
+        print("codex_app auto_send would then open (not opened): "
+              + thread_link("00000000-0000-0000-0000-000000000000"))
+        from atlas_connectors.claude_app import ClaudeAppRoute
+        claude = ClaudeAppRoute(configuration.permissions_for("claude_app"), mode=routes["claude_app"]["mode"],
+                                surface=routes["claude_app"]["surface"], opener=opened.append)
+        from atlas_connectors.claude_app import permission_mode_for
+        print("claude_app (mode=" + claude.mode + ") would run (not executed): claude -p --permission-mode "
+              + permission_mode_for(claude.policy) + " --output-format json  (prompt on stdin, cwd=<workspace>), "
+              "then detached: claude --desktop --resume <session_id>")
+        print("claude_app prefill opt-in link preview (not opened): "
+              + claude.preview("Say hello & name your model?"))
+        assert opened == []
+
+        from atlas_connectors import peers
+        mailroot = worktree / "peer-data"
+        message = peers.send("claude_app", "grok_bot_desktop", "Status update — synthetic", root=mailroot)
+        received = peers.inbox("grok_bot_desktop", root=mailroot, mark_read=True)
+        assert [m["id"] for m in received] == [message["id"]] and received[0]["trust"].startswith("untrusted_data")
+        answer = peers.reply("grok_bot_desktop", message["id"], "Acknowledged", root=mailroot)
+        assert answer["to"] == "claude_app" and answer["reply_to"] == message["id"]
+        from atlas_connectors import workspaces
+        print("Shared workspace default base (not created): <Documents>/" + workspaces.BASE_NAME + "/<name>")
+        try:
+            workspaces.create("Demo", base=temporary, root=mailroot)
+        except Exception as error:
+            assert "temp" in str(error) and not (worktree / "Demo").exists()
+        else:
+            raise AssertionError("workspace create accepted a temp dir")
+        print("Shared workspace: create inside the temp dir refused (nothing created)")
+        print("Peer mailbox: send -> inbox (untrusted data) -> reply round trip in a temp dir; nothing delivered")
 
         forbidden = {"prompt_mode": "pointer", "cmd": ["fixture", "--dangerously-skip-permissions"]}
         try:

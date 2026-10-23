@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from atlas_connectors.adapters import API_OVERRIDES, AdapterError, CLIAdapter, failure_category
+from atlas_connectors.adapters import billing_guard, API_OVERRIDES, AdapterError, CLIAdapter, failure_category
 
 FINAL = {"kind": "final", "id": "", "tool": "", "arguments": "", "text": "fixture"}
 
@@ -33,7 +33,7 @@ class LaunchBoundary(unittest.TestCase):
                         Path(argv[argv.index("-o") + 1]).write_text(json.dumps(FINAL))
                         return 0, "", ""
                     return 0, json.dumps({"structured_output": FINAL}), ""
-                with patch.dict(os.environ, {}, clear=True), patch("shutil.which", return_value="/fixture/client"), patch("atlas_connectors.adapters.execute", side_effect=process):
+                with patch.dict(os.environ, {k: os.environ[k] for k in ("USERPROFILE", "HOME", "SystemRoot") if k in os.environ}, clear=True), patch("shutil.which", return_value="/fixture/client"), patch("atlas_connectors.adapters.execute", side_effect=process):
                     adapter = CLIAdapter(provider, auth_directory=str(auth))
                     self.assertEqual(json.loads(adapter.complete("fixture prompt")), FINAL)
                 argv, options = calls[-1]
@@ -72,7 +72,7 @@ class LaunchBoundary(unittest.TestCase):
 
     def test_cached_api_login_refuses_before_inference(self):
         for provider, version in (("claude", "2.1.246"), ("codex", "0.153.4")):
-            with self.subTest(provider=provider), patch.dict(os.environ, {}, clear=True), patch("shutil.which", return_value="/fixture/client"):
+            with self.subTest(provider=provider), patch.dict(os.environ, {k: os.environ[k] for k in ("USERPROFILE", "HOME", "SystemRoot") if k in os.environ}, clear=True), patch("shutil.which", return_value="/fixture/client"):
                 def process(argv, **kwargs):
                     if "--version" in argv:
                         return 0, "client " + version, ""
@@ -83,6 +83,28 @@ class LaunchBoundary(unittest.TestCase):
                     with self.assertRaises(AdapterError):
                         CLIAdapter(provider).complete("fixture")
                     self.assertEqual(execute.call_count, 2)
+
+
+class BillingGuard(unittest.TestCase):
+    def test_anthropic_vars_do_not_block_codex(self):
+        env = {"ANTHROPIC_BASE_URL": "https://api.anthropic.com", "ANTHROPIC_API_KEY": "x", "CLAUDE_CODE_USE_BEDROCK": "1"}
+        self.assertEqual(sorted(billing_guard("codex", env)), sorted(env))
+
+    def test_openai_override_blocks_codex(self):
+        with self.assertRaises(AdapterError):
+            billing_guard("codex", {"OPENAI_BASE_URL": "https://x"})
+
+    def test_claude_app_loopback_proxy_is_ignored(self):
+        self.assertTrue(billing_guard("claude", {"ANTHROPIC_BASE_URL": "http://127.0.0.1:53111"}))
+        self.assertTrue(billing_guard("claude", {"ANTHROPIC_BASE_URL": "http://localhost:8080/v1"}))
+
+    def test_claude_remote_url_or_key_refuses(self):
+        for env in ({"ANTHROPIC_BASE_URL": "https://api.anthropic.com"},
+                    {"ANTHROPIC_BASE_URL": "http://localhost.evil.com"},
+                    {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1", "ANTHROPIC_AUTH_TOKEN": "t"},
+                    {"ANTHROPIC_API_KEY": "k"}):
+            with self.subTest(env=env), self.assertRaises(AdapterError):
+                billing_guard("claude", env)
 
 
 if __name__ == "__main__":
