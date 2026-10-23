@@ -266,3 +266,13 @@ critically check the proposal. A different FINAL ANSWER replaces the proposal an
 resolved only when the other side replies `AGREE` to the latest proposal. Otherwise it stops after `--rounds` (default 6, max 10), in
 which case the last proposal is returned as unresolved. It uses the same saved sessions and read-only
 permissions as `converse`.
+
+## Visible collaborations (defaults)
+
+Each `solve` / `converse` run starts a **new** Codex thread and a **new** Claude session for that problem. Both
+are reused for every turn of the run. The Codex thread is named after the first line of the problem
+(`thread/name/set`). After the last turn, both are opened in their desktop apps (`codex://threads/<id>` and a
+detached `claude --desktop --resume <id>`). `--no-open` skips opening, and `--continue` extends the last saved
+pair instead (see the Codex lock limitation above). `send --provider claude_app` opens the continued session in
+the Claude app by default. `send --provider codex_app` prints the thread link and a hint; add `--open` to open
+it in the app.

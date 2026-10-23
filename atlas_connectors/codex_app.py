@@ -266,7 +266,7 @@ class CodexAppRoute:
         if live:
             live["session"].close()
 
-    def _auto_send(self, prompt, thread_id=None, open_app=True, keep_alive=False):
+    def _auto_send(self, prompt, thread_id=None, open_app=True, keep_alive=False, title=None):
         prompt = _prompt(prompt)
         if len(prompt.encode()) > MAX_PROMPT_BYTES:
             raise AdapterError("Prompt exceeds the supported limit")
@@ -322,7 +322,12 @@ class CodexAppRoute:
                     thread_id = (started.get("thread") or {}).get("id") or started.get("threadId")
                 if not isinstance(thread_id, str) or not re.fullmatch(UUID, thread_id):
                     raise AdapterError("codex app-server returned no thread id; nothing opened, no fallback")
-                session.call(2, "turn/start", {"threadId": thread_id,
+                if title and not continuing:
+                    try:  # sidebar title; cosmetic, never blocks the send
+                        session.call(3, "thread/name/set", {"threadId": thread_id, "name": title[:80]}, deadline, collect)
+                    except AdapterError:
+                        pass
+                session.call(4, "turn/start", {"threadId": thread_id,
                                                "input": [{"type": "text", "text": prompt}]}, deadline, collect)
             except _Accepted:
                 pass
@@ -342,7 +347,7 @@ class CodexAppRoute:
             if keep:
                 if not reuse:
                     self._live = {"session": session, "thread_id": thread_id, "executable": executable,
-                                  "version": version, "ident": 2}
+                                  "version": version, "ident": 4}
             else:
                 if reuse:
                     self._live = None
@@ -361,11 +366,11 @@ class CodexAppRoute:
                 "delivery": "sent via codex app-server; app asked to open the thread" + (
                     "" if completion == "completed" else "; reply completion not observed")}
 
-    def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False):
+    def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False, title=None):
         """keep_alive keeps the app-server running so the next deliver(thread_id=...) continues the same
         thread in-process (the Codex app holds a writer lock once it opens a thread, so open it last)."""
-        if thread_id is not None or not open_app or keep_alive:
+        if thread_id is not None or not open_app or keep_alive or title:
             if self.mode != "auto_send":
                 raise AdapterError("Continuing a thread requires auto_send mode")
-            return self._auto_send(prompt, thread_id, open_app, keep_alive)
+            return self._auto_send(prompt, thread_id, open_app, keep_alive, title)
         return self._auto_send(prompt) if self.mode == "auto_send" else self._prefill(prompt)

@@ -169,7 +169,8 @@ def main(argv=None):
     send.add_argument("--new-session", action="store_true", help="start a fresh session instead of continuing the saved one")
     send.add_argument("--session", help="continue this specific session/thread id (saved as the current one)")
     send.add_argument("--open", action="store_true",
-                      help="also open the session in the desktop app (Codex then locks the thread until the app restarts)")
+                      help="codex_app: also open the thread in the app (it then locks the thread until the app restarts)")
+    send.add_argument("--no-open", action="store_true", help="claude_app: do not open the session in the desktop app")
     send.add_argument("--data-dir", default=None)
     for name, rounds, text in (("converse", 3, "Codex and Claude talk to each other, each in its own saved app session"),
                                ("solve", 6, "Codex and Claude collaborate on your problem until they agree on a FINAL ANSWER")):
@@ -178,9 +179,11 @@ def main(argv=None):
         conv.add_argument("--rounds", type=int, default=rounds, help="each provider speaks once per round (1-10)")
         conv.add_argument("--first", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
         conv.add_argument("--workspace", help="absolute project directory (default: config, else current directory)")
-        conv.add_argument("--new-session", action="store_true", help="start a new Codex+Claude pair")
-        conv.add_argument("--open", action="store_true",
-                          help="open both sessions in the apps at the end (Codex then locks its thread until the app restarts)")
+        conv.add_argument("--continue", dest="continue_pair", action="store_true",
+                          help="extend the last saved Codex+Claude pair instead of starting a new pair for this run "
+                               "(a Codex thread already opened in the app may be locked until the app restarts)")
+        conv.add_argument("--new-session", action="store_true", help="(default) start a new Codex+Claude pair")
+        conv.add_argument("--no-open", action="store_true", help="do not open the sessions in the desktop apps")
         conv.add_argument("--json", action="store_true")
         conv.add_argument("--config", default=None)
         conv.add_argument("--data-dir", default=None)
@@ -277,10 +280,15 @@ def main(argv=None):
             routes = {name: route_for(configuration, name, mode="auto_send", workspace=args.workspace)
                       for name in (DEFAULT_PROVIDER, "claude_app")}
             workspace = require_workspace(routes[DEFAULT_PROVIDER].workspace)
-            saved = {} if args.new_session else {
-                name: sessionlib.get(name, workspace, args.data_dir) for name in routes}
+            saved = {name: sessionlib.get(name, workspace, args.data_dir) for name in routes} \
+                if args.continue_pair and not args.new_session else {}
+            first_line = next((line.strip() for line in args.prompt.splitlines() if line.strip()), "")
+            title = ("Solve: " if args.command == "solve" else "Converse: ") + first_line
             result = relay(routes, args.prompt, rounds=args.rounds, first=args.first, sessions=saved,
-                           solve=args.command == "solve", open_codex=args.open, handoff_claude=args.open)
+                           solve=args.command == "solve", open_apps=not args.no_open, title=title[:80])
+            if args.continue_pair:
+                result["warning"] = ("Continuing the saved pair; if the Codex app has this thread open it may be "
+                                     "locked until the app restarts (run without --continue for a new pair).")
             for name, sid in result["sessions"].items():
                 if sid:
                     sessionlib.save(name, workspace, sid, args.data_dir)
@@ -310,11 +318,15 @@ def main(argv=None):
                 current = args.session or (None if args.new_session else
                                            sessionlib.get(args.provider, workspace, args.data_dir))
                 if args.provider == "claude_app":
-                    result = route.deliver(args.prompt, session_id=current, handoff=args.open or current is None)
+                    result = route.deliver(args.prompt, session_id=current, handoff=not args.no_open)
                     sid = result.get("session_id")
                 else:
                     result = route.deliver(args.prompt, thread_id=current, open_app=args.open)
                     sid = result.get("thread_id")
+                    if not args.open:
+                        result["hint"] = (f"Open it in the Codex app with {result.get('link')} or rerun with --open. "
+                                          "Once open in the app, the thread is locked for further sends until the "
+                                          "app restarts; use --new-session then.")
                 if sid:
                     sessionlib.save(args.provider, workspace, sid, args.data_dir)
                 result["session_reused"] = current is not None

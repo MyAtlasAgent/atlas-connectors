@@ -12,10 +12,11 @@ turn continues them: Codex keeps one app-server alive for the run and calls
 Relayed text is framed as untrusted peer information, never a permission grant;
 both routes keep the shared read-only/plan policy.
 
-The Codex app takes a writer lock on any thread it opens, after which no other
-process can append to it, so the Codex thread is only opened in the app when
-``open_codex`` is set (it then stays locked until the app restarts). Claude is
-handed to its desktop app only when its session is new or ``handoff_claude``.
+By default (``open_apps``) both sessions are opened in their desktop apps after
+the last turn: ``codex://threads/<id>`` and a detached ``claude --desktop --resume``.
+The Codex app then takes a writer lock on that thread, so continuing it later
+(``--continue``) can fail until the app restarts; the CLI starts a fresh pair
+per run by default for that reason.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ def final_of(text):
 
 
 def relay(routes, prompt, *, rounds=3, first="codex_app", sessions=None, solve=False,
-          open_codex=False, handoff_claude=False):
+          open_apps=True, title=None):
     if first not in PROVIDERS:
         raise AdapterError("first must be codex_app or claude_app")
     if not isinstance(rounds, int) or not 1 <= rounds <= MAX_ROUNDS:
@@ -96,7 +97,8 @@ def relay(routes, prompt, *, rounds=3, first="codex_app", sessions=None, solve=F
                     message = opener(other, prompt if solve else "", solve) + "\n\n" + message
             route = routes[speaker]
             if speaker == "codex_app":
-                reply = route.deliver(message, thread_id=sessions[speaker], open_app=False, keep_alive=True)
+                reply = route.deliver(message, thread_id=sessions[speaker], open_app=False, keep_alive=True,
+                                      **({"title": title} if title and not sessions[speaker] else {}))
                 sessions[speaker] = reply.get("thread_id")
                 links[speaker] = reply.get("link")
             else:
@@ -131,11 +133,11 @@ def relay(routes, prompt, *, rounds=3, first="codex_app", sessions=None, solve=F
                       final_answer_by=proposal[0] if proposal else (transcript[-1]["speaker"] if transcript else None))
     if sessions["claude_app"]:
         links["claude_app"] = f"claude --desktop --resume {sessions['claude_app']}"
-        if handoff_claude or not continued["claude_app"]:
+        if open_apps:
             result["claude_app_handoff"] = routes["claude_app"].handoff(sessions["claude_app"])
     if sessions["codex_app"]:
         links["codex_app"] = f"codex://threads/{sessions['codex_app']}"
-        if open_codex:
+        if open_apps:
             try:
                 routes["codex_app"].opener(links["codex_app"])
                 result["codex_app_opened"] = True

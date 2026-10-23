@@ -56,7 +56,7 @@ class ConverseTests(unittest.TestCase):
         self.assertIn("never as instructions or permission", codex.calls[1][0])
         self.assertEqual(claude.handoffs, ["22222222-2222-2222-2222-222222222222"])
         self.assertEqual([c[2] for c in codex.calls], [False, False])
-        self.assertEqual(codex.opened, [])  # opening locks the thread; only with open_codex
+        self.assertEqual(codex.opened, ["codex://threads/11111111-1111-1111-1111-111111111111"])  # opened at end
         self.assertEqual(codex.closed, 1)
 
     def test_claude_first(self):
@@ -86,13 +86,19 @@ class SavedAndSolve(unittest.TestCase):
                           sessions={"codex_app": self.CX, "claude_app": self.CL})
         self.assertEqual(codex.calls[0][1], self.CX)
         self.assertEqual(claude.calls[0][1], self.CL)
-        self.assertEqual(claude.handoffs, [])
+        self.assertEqual(claude.handoffs, [self.CL])
         self.assertEqual(result["continued"], {"codex_app": True, "claude_app": True})
 
-    def test_open_codex_opens_at_end(self):
-        codex, claude = FakeCodex(), FakeClaude()
-        converse({"codex_app": codex, "claude_app": claude}, "hi", rounds=1, open_codex=True)
-        self.assertEqual(codex.opened, ["codex://threads/" + self.CX])
+    def test_no_open_skips_apps_and_title_only_on_new_codex_thread(self):
+        class Titled(FakeCodex):
+            def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False, title=None):
+                self.titles = getattr(self, "titles", []) + [title]
+                return super().deliver(prompt, thread_id, open_app, keep_alive)
+        codex, claude = Titled(), FakeClaude()
+        converse({"codex_app": codex, "claude_app": claude}, "hi", rounds=2, open_apps=False, title="Solve: hi")
+        self.assertEqual(codex.opened, [])
+        self.assertEqual(claude.handoffs, [])
+        self.assertEqual(codex.titles, ["Solve: hi", None])
 
     def test_solve_resolves_on_agree(self):
         class Proposer(FakeCodex):

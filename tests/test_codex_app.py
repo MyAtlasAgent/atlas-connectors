@@ -80,6 +80,8 @@ class FakeAppServer:
             self.emit({"id": ident, "result": {"userAgent": "fake"}})
         elif method == "thread/start":
             self.emit({"id": ident, "result": {"thread": {"id": self.thread_id}}})
+        elif method == "thread/name/set":
+            self.emit({"id": ident, "result": {}})
         elif method == "turn/start":
             self.emit({"id": ident, "result": {"turn": {"id": "t1", "status": "inProgress"}}})
             self.emit({"id": 99, "method": "item/commandExecution/requestApproval", "params": {}})
@@ -179,6 +181,12 @@ class Route(unittest.TestCase):
         self.assertEqual(methods, ["initialize", "initialized", "thread/start", "turn/start", "turn/start"])
         self.assertEqual(second["thread_id"], TID)
         self.assertEqual(self.opened, [])
+
+    def test_title_is_set_on_new_thread(self):
+        server = FakeAppServer()
+        self.route(server).deliver("hi", title="Solve: hi")
+        named = [m for m in server.sent if m.get("method") == "thread/name/set"]
+        self.assertEqual(named[0]["params"], {"threadId": TID, "name": "Solve: hi"})
 
     def test_active_writer_lock_is_a_clear_error_not_a_new_thread(self):
         class Locked(FakeAppServer):
