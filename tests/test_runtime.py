@@ -10,6 +10,8 @@ from unittest.mock import patch
 
 from atlas_connectors.adapters import AdapterError, CLIAdapter, client_environment
 from atlas_connectors.broker import PermissionDenied, ToolBroker, UnsupportedCapability
+
+POSIX_ONLY = unittest.skipUnless(os.name == "posix", "ToolBroker filesystem enforcement is POSIX-only by design; it refuses on Windows")
 from atlas_connectors.cli import adapter_for, initialize
 from atlas_connectors.permissions import PermissionPolicy, load_configuration
 from atlas_connectors.process import ProcessError, execute
@@ -25,6 +27,7 @@ def request(tool="write_file", path="result.txt", ident="one", **arguments):
     return {"id": ident, "tool": tool, "arguments": {"path": path, **arguments}}
 
 
+@POSIX_ONLY
 class BrokerEffects(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -176,6 +179,7 @@ class StandaloneRuntime(unittest.TestCase):
         with self.assertRaises(AdapterError):
             CLIAdapter("grok_bot_desktop")
 
+    @POSIX_ONLY
     def test_model_cannot_forge_approval_in_arguments(self):
         with tempfile.TemporaryDirectory() as temporary:
             broker = ToolBroker(temporary, policy(default="allow"))
@@ -192,6 +196,7 @@ class StandaloneRuntime(unittest.TestCase):
                 execute([sys.executable, "-c", "import time; time.sleep(60)"],
                         cwd=temporary, env={}, timeout=0.1)
 
+    @POSIX_ONLY
     def test_loop_performs_real_effect_then_returns_distinct_model_claim(self):
         class FixtureAdapter:
             observations = []

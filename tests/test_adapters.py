@@ -33,7 +33,7 @@ class LaunchBoundary(unittest.TestCase):
                         Path(argv[argv.index("-o") + 1]).write_text(json.dumps(FINAL))
                         return 0, "", ""
                     return 0, json.dumps({"structured_output": FINAL}), ""
-                with patch.dict(os.environ, {}, clear=True), patch("shutil.which", return_value="/fixture/client"), patch("atlas_connectors.adapters.execute", side_effect=process):
+                with patch.dict(os.environ, {k: os.environ[k] for k in ("USERPROFILE", "HOME", "SystemRoot") if k in os.environ}, clear=True), patch("shutil.which", return_value="/fixture/client"), patch("atlas_connectors.adapters.execute", side_effect=process):
                     adapter = CLIAdapter(provider, auth_directory=str(auth))
                     self.assertEqual(json.loads(adapter.complete("fixture prompt")), FINAL)
                 argv, options = calls[-1]
@@ -72,7 +72,7 @@ class LaunchBoundary(unittest.TestCase):
 
     def test_cached_api_login_refuses_before_inference(self):
         for provider, version in (("claude", "2.1.246"), ("codex", "0.153.4")):
-            with self.subTest(provider=provider), patch.dict(os.environ, {}, clear=True), patch("shutil.which", return_value="/fixture/client"):
+            with self.subTest(provider=provider), patch.dict(os.environ, {k: os.environ[k] for k in ("USERPROFILE", "HOME", "SystemRoot") if k in os.environ}, clear=True), patch("shutil.which", return_value="/fixture/client"):
                 def process(argv, **kwargs):
                     if "--version" in argv:
                         return 0, "client " + version, ""

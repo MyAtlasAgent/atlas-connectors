@@ -108,6 +108,41 @@ class SavedAndSolve(unittest.TestCase):
         self.assertEqual(len(codex.calls), 1)
         self.assertIn("FINAL ANSWER", codex.calls[0][0])
 
+    def test_revised_final_answer_is_not_agreement(self):
+        class Proposer(FakeCodex):
+            def deliver(self, prompt, **kw):
+                r = super().deliver(prompt, **kw)
+                r["reply_text"] = ["FINAL ANSWER: plan A", "Checked B, it is right.\nAGREE"][len(self.calls) - 1]
+                return r
+        codex = Proposer()
+        claude = FakeClaude(replies=["A misses errors.\nFINAL ANSWER: plan B"])
+        result = solve({"codex_app": codex, "claude_app": claude}, "p")
+        self.assertTrue(result["resolved"])
+        self.assertEqual(result["final_answer"], "plan B")
+        self.assertEqual(result["agreed_by"], "codex_app")
+        self.assertEqual(result["rounds_used"], 2)
+        self.assertIn("critically review", claude.calls[0][0])
+        self.assertIn("critically review", codex.calls[1][0])
+
+    def test_revision_alone_stays_unresolved(self):
+        class Proposer(FakeCodex):
+            def deliver(self, prompt, **kw):
+                r = super().deliver(prompt, **kw)
+                r["reply_text"] = "FINAL ANSWER: plan A"
+                return r
+        result = solve({"codex_app": Proposer(), "claude_app": FakeClaude(replies=["FINAL ANSWER: plan B"])}, "p", rounds=1)
+        self.assertFalse(result["resolved"])
+        self.assertEqual(result["final_answer"], "plan B")
+
+    def test_identical_final_counts_as_agreement(self):
+        class Proposer(FakeCodex):
+            def deliver(self, prompt, **kw):
+                r = super().deliver(prompt, **kw)
+                r["reply_text"] = "FINAL ANSWER: plan  A"
+                return r
+        result = solve({"codex_app": Proposer(), "claude_app": FakeClaude(replies=["Checked.\nFINAL ANSWER: plan A"])}, "p")
+        self.assertTrue(result["resolved"])
+
     def test_solve_unresolved_at_limit(self):
         result = solve({"codex_app": FakeCodex(), "claude_app": FakeClaude()}, "p", rounds=2)
         self.assertFalse(result["resolved"])

@@ -261,7 +261,8 @@ atlas-connectors solve "Write a PowerShell one-liner that lists the 5 largest fi
 ```
 
 Each assistant builds on or critiques the other's last reply. It ends with `FINAL ANSWER: ...` when it
-thinks the problem is solved, and replies `AGREE` to accept the other's answer. The run stops once one side
-posts a final answer and the other agrees (or posts its own), or after `--rounds` (default 6, max 10), in
+thinks the problem is solved, and replies `AGREE` to accept the other's answer. Before agreeing, the reviewer is asked to
+critically check the proposal. A different FINAL ANSWER replaces the proposal and passes back for review; the run is
+resolved only when the other side replies `AGREE` to the latest proposal. Otherwise it stops after `--rounds` (default 6, max 10), in
 which case the last proposal is returned as unresolved. It uses the same saved sessions and read-only
 permissions as `converse`.

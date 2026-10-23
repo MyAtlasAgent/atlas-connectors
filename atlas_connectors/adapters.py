@@ -105,7 +105,15 @@ class CLIAdapter:
                 login = auth / "auth.json"
                 if not login.is_file():
                     raise AdapterError("Grok login unavailable: run grok login first")
-                (isolated / "auth.json").symlink_to(login)
+                try:
+                    (isolated / "auth.json").symlink_to(login)
+                except OSError:
+                    # Windows without Developer Mode cannot symlink; a hard link keeps one shared file.
+                    try:
+                        os.link(login, isolated / "auth.json")
+                    except OSError:
+                        raise AdapterError("Could not link the Grok login into the isolated client directory "
+                                           "(symlink and hard link both refused); nothing sent") from None
                 (isolated / "config.toml").write_text('[cli]\nauto_update = false\nuse_leader = false\n')
                 auth = isolated
             env = client_environment(self.provider, root, auth, default_claude_login=self.default_claude_login)

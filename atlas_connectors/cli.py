@@ -295,7 +295,7 @@ def main(argv=None):
                 if "claude_app_handoff" in result:
                     print(f"claude desktop handoff: {result['claude_app_handoff']}")
                 if args.command == "solve":
-                    print(f"resolved: {'yes' if result['resolved'] else 'no'} (rounds used: {result['rounds_used']})")
+                    print(f"resolved: {'yes' if result['resolved'] else 'no'} (rounds used: {result['rounds_used']}" + (f", agreed by {result['agreed_by']}" if result.get('agreed_by') else '') + ')')
                     print(f"FINAL ANSWER ({result['final_answer_by']}):\n{result['final_answer']}")
             return 0 if result["status"] == "completed" else 2
         elif args.command == "send":

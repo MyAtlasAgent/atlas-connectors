@@ -87,7 +87,7 @@ class ClaudeApp(unittest.TestCase):
         self.assertEqual(argv[1:], ["-p", "--permission-mode", "plan", "--output-format", "json"])
         self.assertEqual(runner.stdin, ["--hello"])  # prompt on stdin, never parsed as a flag
         self.assertEqual(runner.cwd, self.workspace)
-        self.assertEqual(self.launcher.calls, [(["/usr/bin/true", "--desktop", "--resume", SID], self.workspace)])
+        self.assertEqual(self.launcher.calls, [([str(Path("/usr/bin/true").resolve()), "--desktop", "--resume", SID], self.workspace)])
 
     def test_handoff_failure_or_timeout_reports_resume_command(self):
         for code, label in ((1, "exit 1"), (None, "timeout"), (OSError("x"), "launch_error")):
