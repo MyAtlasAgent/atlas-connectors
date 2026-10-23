@@ -144,7 +144,8 @@ class StandaloneRuntime(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             result = initialize(temporary, isolated=True)
             configuration = load_configuration(result["configuration"])
-            self.assertEqual(len(configuration.providers), 3)
+            self.assertEqual(len(configuration.providers), 4)
+            self.assertEqual(next(iter(configuration.providers)), "codex_app")
             self.assertEqual(configuration.policy.preference("write_files"), "ask")
             with self.assertRaises(ValueError):
                 initialize(temporary)

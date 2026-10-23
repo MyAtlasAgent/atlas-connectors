@@ -24,6 +24,29 @@ Official installers: [Claude Code](https://code.claude.com/docs/en/setup),
 [Codex CLI](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
 [Grok Build](https://docs.x.ai/build).
 
+## Quick start: Codex desktop app (default route)
+
+New configurations default to `codex_app`, which uses the Codex desktop app on
+your ChatGPT subscription (Claude needs a paid Claude plan; API billing is refused).
+
+```sh
+atlas-connectors init connector-config
+atlas-connectors send 'Say hello'                 # auto_send (default)
+atlas-connectors send 'Say hello' --mode prefill  # you press Send in the app
+atlas-connectors send 'Say hello' --preview       # print link, launch nothing
+```
+
+`auto_send` runs `codex exec --skip-git-repo-check -s <sandbox> -o <tmp>/return.md`
+on your ChatGPT login (sandbox derived from the shared policy; `ask` maps to
+read-only, never broader), reads the session id, then opens
+`codex://threads/<session-id>`. No keystrokes or UI automation are used. Whether a
+CLI-sent session appears in the app's thread list is verified only by that deep
+link opening it. If no session id is found the result is `sent_session_unknown`
+and nothing is opened. CLI failure opens nothing and never falls back.
+`prefill` opens `codex://threads/new?prompt=...` (optional `&path=`); the app never
+auto-submits, so the result is `prefilled_awaiting_user_send`. Set
+`"mode": "prefill"` on the `codex_app` route to make that the default.
+
 ## Install and connect
 
 ```sh

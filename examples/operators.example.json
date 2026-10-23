@@ -1,7 +1,13 @@
 {
-  "description": "Offline transport shapes only. All providers inherit one user policy; native enforcement is not implemented.",
+  "description": "Offline transport shapes only. codex_app is the default route for new users. All providers inherit one user policy.",
   "permission_policy": "permissions.json",
   "providers": {
+    "codex_app": {
+      "transport": "codex_app",
+      "mode": "auto_send",
+      "executable": "codex",
+      "cmd": null
+    },
     "claude": {
       "prompt_mode": "pointer",
       "cmd": [

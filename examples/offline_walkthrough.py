@@ -11,6 +11,7 @@ import runpy
 import sys
 import tempfile
 from unittest.mock import patch
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -57,7 +58,7 @@ def main():
             assert configuration.permissions_for(provider) is configuration.policy
             assert all(configuration.permissions_for(provider).preference(capability) == "ask"
                        for capability in CAPABILITIES)
-        print("All four providers inherit the same user-selected permissions (example: ask)")
+        print("All five providers inherit the same user-selected permissions (example: ask)")
         for name in ("claude", "codex", "supergrok_cli"):
             command = context["build_cmd"](routes[name], str(packet), temporary, callsign="DEMO")
             assert command and "{prompt}" not in " ".join(command)
@@ -67,6 +68,18 @@ def main():
         assert len(receipts) == 3
         assert routes["grok_bot_desktop"]["cmd"] is None
         print("Grok Bot desktop: manual packet delivery, no automatic command")
+
+        from atlas_connectors.codex_app import CodexAppRoute, thread_link
+        opened = []
+        app = CodexAppRoute(configuration.permissions_for("codex_app"), mode=routes["codex_app"]["mode"],
+                            workspace=temporary, opener=opened.append,
+                            runner=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no launch")))
+        link = app.preview("Say hello & name your model?")
+        print("codex_app (default route, mode=" + app.mode + ") prefill link preview (not opened): "
+              + link.replace(quote(str(Path(temporary).resolve()), safe=""), "<TEMP>"))
+        print("codex_app auto_send would open after CLI send (not opened): "
+              + thread_link("00000000-0000-0000-0000-000000000000"))
+        assert opened == []
 
         forbidden = {"prompt_mode": "pointer", "cmd": ["fixture", "--dangerously-skip-permissions"]}
         try:

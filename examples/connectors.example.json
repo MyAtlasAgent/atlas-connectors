@@ -1,8 +1,22 @@
 {
   "permission_policy": "permissions.json",
   "providers": {
-    "claude": {"transport": "subscription_cli", "executable": "claude"},
-    "codex": {"transport": "subscription_cli", "executable": "codex"},
-    "supergrok_cli": {"transport": "subscription_cli", "executable": "grok"}
+    "codex_app": {
+      "transport": "codex_app",
+      "mode": "auto_send",
+      "executable": "codex"
+    },
+    "claude": {
+      "transport": "subscription_cli",
+      "executable": "claude"
+    },
+    "codex": {
+      "transport": "subscription_cli",
+      "executable": "codex"
+    },
+    "supergrok_cli": {
+      "transport": "subscription_cli",
+      "executable": "grok"
+    }
   }
 }

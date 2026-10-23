@@ -55,3 +55,12 @@ Official references: [Claude controls](https://code.claude.com/docs/en/cli-refer
 [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
 [Grok permissions](https://docs.x.ai/build/features/permissions),
 [Grok headless transport](https://docs.x.ai/build/cli/headless-scripting).
+
+## codex_app
+
+`codex_app` inherits the same shared policy (no provider override). For
+`auto_send` it maps to Codex native controls: `write_files=allow` gives
+`workspace-write`, otherwise `read-only`; shell only when `run_commands=allow`;
+web search only when `network=allow`; `read_files=deny` refuses. `ask` cannot be
+asked inside `codex exec`, so it maps to the narrower setting. Effects here are
+Codex-native, not brokered. `prefill` performs no effects until the user sends.

@@ -8,6 +8,7 @@ import sys
 import tempfile
 
 from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, client_environment
+from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
 from .broker import ToolBroker
 from .permissions import PermissionPolicy, load_configuration
 from .protocol import INSTRUCTIONS, parse
@@ -20,7 +21,8 @@ def initialize(directory, isolated=False):
     if any(path.exists() for path in destinations):
         raise ValueError("Configuration already exists; no files overwritten")
     root.mkdir(parents=True, exist_ok=True)
-    providers = {}
+    # New users default to the Codex desktop app on their ChatGPT login.
+    providers = {DEFAULT_PROVIDER: {"transport": "codex_app", "mode": DEFAULT_MODE, "executable": "codex"}}
     for name, binary in BINARIES.items():
         route = {"transport": "subscription_cli", "executable": binary}
         if isolated:
@@ -39,6 +41,19 @@ def adapter_for(configuration, provider):
     if route.get("transport") != "subscription_cli":
         raise AdapterError("Selected route is not a standalone subscription CLI; no transport substitution")
     return CLIAdapter(provider, **{key: route[key] for key in ("executable", "model", "auth_directory", "timeout") if key in route})
+
+
+def route_for(configuration, provider=DEFAULT_PROVIDER, *, mode=None, workspace=None, runner=None, opener=None):
+    """Build the codex_app route; refuses other providers instead of substituting."""
+    route = configuration.providers.get(provider)
+    if route is None:
+        raise AdapterError("Provider is not configured")
+    if route.get("transport") != "codex_app":
+        raise AdapterError("Selected route is not codex_app; use `run` for CLI providers; no substitution")
+    return CodexAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", DEFAULT_MODE),
+                         executable=route.get("executable", "codex"),
+                         workspace=workspace or route.get("workspace"),
+                         timeout=route.get("timeout", 300), runner=runner, opener=opener)
 
 
 def terminal_approval(capability, request):
@@ -78,6 +93,13 @@ def main(argv=None):
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
     init.add_argument("directory", nargs="?", default="connector-config")
     init.add_argument("--isolated-logins", action="store_true")
+    send = commands.add_parser("send", help="default route: deliver a prompt to the Codex desktop app")
+    send.add_argument("prompt")
+    send.add_argument("--provider", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER])
+    send.add_argument("--mode", choices=MODES, help="auto_send (default) or prefill (user presses Send)")
+    send.add_argument("--workspace", help="absolute existing directory for the thread")
+    send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
+    send.add_argument("--config", default="connector-config/connectors.json")
     for command in ("doctor", "login", "run", "smoke"):
         sub = commands.add_parser(command)
         sub.add_argument("provider", choices=[*BINARIES, "grok_bot_desktop"])
@@ -90,6 +112,14 @@ def main(argv=None):
     try:
         if args.command == "init":
             result = initialize(args.directory, args.isolated_logins)
+        elif args.command == "send":
+            route = route_for(load_configuration(args.config), args.provider, mode=args.mode, workspace=args.workspace)
+            if args.preview:
+                result = {"status": "preview", "link": route.preview(args.prompt), "launched": False}
+            else:
+                result = route.deliver(args.prompt)
+            print(json.dumps(result, indent=2))
+            return 0 if result["status"] in ("sent", "preview", "prefilled_awaiting_user_send") else 2
         else:
             configuration = load_configuration(args.config)
             adapter = adapter_for(configuration, args.provider)

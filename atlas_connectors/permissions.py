@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-PROVIDERS = ("claude", "codex", "supergrok_cli", "grok_bot_desktop")
+PROVIDERS = ("codex_app", "claude", "codex", "supergrok_cli", "grok_bot_desktop")
 CAPABILITIES = (
     "read_files", "write_files", "run_commands", "network", "git_commit",
     "git_push", "connected_tools", "read_credentials", "merge", "install",
@@ -121,8 +121,13 @@ def load_configuration(path):
     for name, raw_route in providers.items():
         route = _object(raw_route, name)
         if set(route) - {"prompt_mode", "cmd", "transport", "automatic_connector",
-                         "executable", "model", "auth_directory", "timeout"}:
+                         "executable", "model", "auth_directory", "timeout",
+                         "mode", "workspace"}:
             raise ConfigurationError(f"{name}: provider-specific permission/configuration override refused")
+        if (name == "codex_app") != (route.get("transport") == "codex_app"):
+            raise ConfigurationError(f"{name}: codex_app transport is only valid for the codex_app provider")
+        if "mode" in route and route["mode"] not in ("auto_send", "prefill"):
+            raise ConfigurationError(f"{name}: mode must be auto_send or prefill")
         cmd = route.get("cmd")
         if cmd is not None:
             if not isinstance(cmd, list) or not cmd or any(not isinstance(arg, str) for arg in cmd):

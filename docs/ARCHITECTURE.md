@@ -25,3 +25,9 @@ actual broker effects are separate observations.
 This release supports file reads, listing and atomic writes. Other capabilities
 and desktop automation explicitly refuse. Historical reading copies under
 `reference/` are not imported or included in the installed wheel.
+
+`codex_app.py` is the default new-user route. `auto_send` sends through the
+Codex CLI on the ChatGPT login, then opens `codex://threads/<session-id>`;
+`prefill` opens `codex://threads/new?prompt=` and the user presses Send. The
+opener and runner are injectable; neither mode falls back to the other, another
+provider or API billing.
