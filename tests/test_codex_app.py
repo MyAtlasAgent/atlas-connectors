@@ -180,6 +180,21 @@ class Route(unittest.TestCase):
         self.assertEqual(second["thread_id"], TID)
         self.assertEqual(self.opened, [])
 
+    def test_active_writer_lock_is_a_clear_error_not_a_new_thread(self):
+        class Locked(FakeAppServer):
+            def receive(self, message):
+                if message.get("method") == "thread/resume":
+                    self.sent.append(message)
+                    self.emit({"id": message["id"], "error": {"code": -32600, "message": "thread x already has an active writer"}})
+                else:
+                    super().receive(message)
+        server = Locked()
+        with self.assertRaises(AdapterError) as caught:
+            self.route(server).deliver("hi", thread_id=TID)
+        self.assertIn("--new-session", str(caught.exception))
+        self.assertNotIn("thread/start", [m.get("method") for m in server.sent])
+        self.assertEqual(self.opened, [])
+
     def test_reply_is_decoded_as_utf8_including_em_dash(self):
         result = self.route(FakeAppServer(reply="Hi — Codex here ✓")).deliver("hello")
         self.assertEqual(result["reply_text"], "Hi — Codex here ✓")

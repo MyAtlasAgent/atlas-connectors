@@ -239,3 +239,29 @@ continuing the *same* two sessions every turn (`--rounds` 1-10, `--first codex_a
 `--workspace DIR`, `--json`). Relayed text is framed as untrusted peer information, never a
 permission grant; both sides keep the shared read-only/plan policy. The Codex thread opens in the
 Codex app; the Claude session is handed to the Claude desktop app after the last turn.
+
+## Saved sessions (default: one conversation per provider + workspace)
+
+`send`, `converse` and `solve` continue the saved session for that provider and workspace, which is kept in
+`<data dir>/sessions.json`. The Codex thread is resumed through the app-server, and Claude continues with
+`claude -p --resume <id>`. Use `--new-session` to start fresh, `--session ID` (send) to target one session,
+and `atlas-connectors sessions [list|reset [provider]]` to inspect or clear what's saved. If a saved session
+can't be resumed, the command fails with an explanation and never creates a new session silently.
+
+**Codex lock limitation:** once the Codex desktop app opens a thread, it holds a writer lock on it
+("already has an active writer"), so no other process can add messages to that thread. The app runs its
+app-server over private stdio, and `codex app-server proxy` finds no control socket, so there's no way to
+send through the app's own server. For this reason, sends do not open Codex threads in the app unless you pass
+`--open`. After that, quit and restart the Codex app to release the thread, or use `--new-session`.
+
+## Solve: collaborate until both agree
+
+```
+atlas-connectors solve "Write a PowerShell one-liner that lists the 5 largest files under Documents."
+```
+
+Each assistant builds on or critiques the other's last reply. It ends with `FINAL ANSWER: ...` when it
+thinks the problem is solved, and replies `AGREE` to accept the other's answer. The run stops once one side
+posts a final answer and the other agrees (or posts its own), or after `--rounds` (default 6, max 10), in
+which case the last proposal is returned as unresolved. It uses the same saved sessions and read-only
+permissions as `converse`.

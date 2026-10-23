@@ -10,7 +10,9 @@ import tempfile
 from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, client_environment
 from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
 from .claude_app import ClaudeAppRoute, SURFACES
-from .converse import converse as conversation
+from .converse import relay
+from . import sessions as sessionlib
+from .codex_app import require_workspace
 from . import peers as peerlib
 from . import workspaces as wslib
 from .broker import ToolBroker
@@ -159,13 +161,28 @@ def main(argv=None):
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
     send.add_argument("--config", default=None)
-    conv = commands.add_parser("converse", help="Codex and Claude talk to each other, each in its own app session")
-    conv.add_argument("prompt")
-    conv.add_argument("--rounds", type=int, default=3, help="each provider speaks once per round (1-10)")
-    conv.add_argument("--first", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
-    conv.add_argument("--workspace", help="absolute project directory (default: config, else current directory)")
-    conv.add_argument("--json", action="store_true")
-    conv.add_argument("--config", default=None)
+    send.add_argument("--new-session", action="store_true", help="start a fresh session instead of continuing the saved one")
+    send.add_argument("--session", help="continue this specific session/thread id (saved as the current one)")
+    send.add_argument("--open", action="store_true",
+                      help="also open the session in the desktop app (Codex then locks the thread until the app restarts)")
+    send.add_argument("--data-dir", default=None)
+    for name, rounds, text in (("converse", 3, "Codex and Claude talk to each other, each in its own saved app session"),
+                               ("solve", 6, "Codex and Claude collaborate on your problem until they agree on a FINAL ANSWER")):
+        conv = commands.add_parser(name, help=text)
+        conv.add_argument("prompt")
+        conv.add_argument("--rounds", type=int, default=rounds, help="each provider speaks once per round (1-10)")
+        conv.add_argument("--first", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
+        conv.add_argument("--workspace", help="absolute project directory (default: config, else current directory)")
+        conv.add_argument("--new-session", action="store_true", help="start a new Codex+Claude pair")
+        conv.add_argument("--open", action="store_true",
+                          help="open both sessions in the apps at the end (Codex then locks its thread until the app restarts)")
+        conv.add_argument("--json", action="store_true")
+        conv.add_argument("--config", default=None)
+        conv.add_argument("--data-dir", default=None)
+    sess = commands.add_parser("sessions", help="list or reset saved app sessions")
+    sess.add_argument("action", nargs="?", choices=["list", "reset"], default="list")
+    sess.add_argument("provider", nargs="?", choices=list(sessionlib.PROVIDERS))
+    sess.add_argument("--data-dir", default=None)
     data = argparse.ArgumentParser(add_help=False)
     data.add_argument("--data-dir", help="override the per-user atlas-connectors data directory")
     peers = commands.add_parser("peers", parents=[data], help="detect local providers; sends nothing")
@@ -245,11 +262,23 @@ def main(argv=None):
             return 0 if not isinstance(result, dict) or result.get("status") != "error" else 2
         if args.command == "init":
             result = initialize(args.directory, args.isolated_logins, args.workspace)
-        elif args.command == "converse":
+        elif args.command == "sessions":
+            result = (sessionlib.reset(args.provider, args.data_dir) if args.action == "reset"
+                      else sessionlib.listing(args.data_dir))
+            print(json.dumps(result, indent=2))
+            return 0
+        elif args.command in ("converse", "solve"):
             configuration = load_configuration(args.config)
             routes = {name: route_for(configuration, name, mode="auto_send", workspace=args.workspace)
                       for name in (DEFAULT_PROVIDER, "claude_app")}
-            result = conversation(routes, args.prompt, rounds=args.rounds, first=args.first)
+            workspace = require_workspace(routes[DEFAULT_PROVIDER].workspace)
+            saved = {} if args.new_session else {
+                name: sessionlib.get(name, workspace, args.data_dir) for name in routes}
+            result = relay(routes, args.prompt, rounds=args.rounds, first=args.first, sessions=saved,
+                           solve=args.command == "solve", open_codex=args.open, handoff_claude=args.open)
+            for name, sid in result["sessions"].items():
+                if sid:
+                    sessionlib.save(name, workspace, sid, args.data_dir)
             if args.json:
                 print(json.dumps(result, indent=2))
             else:
@@ -260,14 +289,30 @@ def main(argv=None):
                     print(f"{name} session: {sid}  {result['links'].get(name, '')}")
                 if "claude_app_handoff" in result:
                     print(f"claude desktop handoff: {result['claude_app_handoff']}")
+                if args.command == "solve":
+                    print(f"resolved: {'yes' if result['resolved'] else 'no'} (rounds used: {result['rounds_used']})")
+                    print(f"FINAL ANSWER ({result['final_answer_by']}):\n{result['final_answer']}")
             return 0 if result["status"] == "completed" else 2
         elif args.command == "send":
             route = route_for(load_configuration(args.config), args.provider, mode=args.mode,
                               workspace=args.workspace, surface=args.surface)
             if args.preview:
                 result = {"status": "preview", "link": route.preview(args.prompt), "launched": False}
-            else:
+            elif route.mode != "auto_send":
                 result = route.deliver(args.prompt)
+            else:
+                workspace = require_workspace(route.workspace)
+                current = args.session or (None if args.new_session else
+                                           sessionlib.get(args.provider, workspace, args.data_dir))
+                if args.provider == "claude_app":
+                    result = route.deliver(args.prompt, session_id=current, handoff=args.open or current is None)
+                    sid = result.get("session_id")
+                else:
+                    result = route.deliver(args.prompt, thread_id=current, open_app=args.open)
+                    sid = result.get("thread_id")
+                if sid:
+                    sessionlib.save(args.provider, workspace, sid, args.data_dir)
+                result["session_reused"] = current is not None
             print(json.dumps(result, indent=2))
             return 0 if result["status"] in ("sent", "preview", "prefilled_awaiting_user_send") else 2
         else:

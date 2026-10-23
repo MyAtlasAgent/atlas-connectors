@@ -189,7 +189,17 @@ class AppServerSession:
             message = self.next(deadline)
             if message.get("id") == ident:
                 if "error" in message:
-                    raise AdapterError(f"codex app-server {method} failed; nothing opened, no fallback")
+                    detail = str((message.get("error") or {}).get("message") or "")[:300]
+                    if method == "thread/resume" and "active writer" in detail:
+                        raise AdapterError(
+                            "Codex thread is locked by the Codex app ('already has an active writer'): the app "
+                            "opened this thread and holds it, and it exposes no socket to send through. Fix: fully "
+                            "quit and reopen the Codex app (the lock is released when the app's server restarts), "
+                            "or start a fresh thread with --new-session. Nothing sent; no new session created.")
+                    if method == "thread/resume":
+                        raise AdapterError(f"Saved Codex thread could not be resumed ({detail}). Nothing sent; no new "
+                                           "session created. Use --new-session to start a fresh thread.")
+                    raise AdapterError(f"codex app-server {method} failed ({detail}); nothing opened, no fallback")
                 return message.get("result") or {}
             collect(message)
 

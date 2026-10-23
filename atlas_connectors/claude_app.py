@@ -160,6 +160,10 @@ class ClaudeAppRoute:
             argv += ["--resume", session_id]
         # Prompt on stdin (UTF-8), so it can never be read as a flag.
         code, out, _ = self.runner(argv, cwd=workspace, env=env, stdin=prompt, timeout=self.timeout)
+        if code and session_id is not None:
+            raise AdapterError(f"Saved Claude session {session_id} could not be resumed (Claude CLI exit {code}; it "
+                               "may have been deleted or belong to another folder). Nothing sent; no new session "
+                               "created. Use --new-session to start a fresh one.")
         if code:
             raise AdapterError(f"claude_app auto_send: Claude CLI exit {code}; nothing opened, no fallback")
         try:
