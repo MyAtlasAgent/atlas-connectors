@@ -363,7 +363,7 @@ class CodexAppRoute:
                 "client_version": version, "executed": True, "thread_id": thread_id, "link": link,
                 "app_thread_opened": bool(open_app), "continued": continuing, "completion": completion, "turn_status": turn_status,
                 "reply_text": finals[-1] if finals else "".join(deltas), "text_provenance": "model_claim",
-                "delivery": "sent via codex app-server; app asked to open the thread" + (
+                "delivery": "sent via codex app-server" + ("; app asked to open the thread" if open_app else "; not opened in the app") + (
                     "" if completion == "completed" else "; reply completion not observed")}
 
     def deliver(self, prompt, thread_id=None, open_app=True, keep_alive=False, title=None):
