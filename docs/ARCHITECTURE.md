@@ -32,6 +32,8 @@ Codex CLI on the ChatGPT login, then opens `codex://threads/<session-id>`;
 opener and runner are injectable; neither mode falls back to the other, another
 provider or API billing.
 
-`claude_app.py` opens `claude://code/new?q=` or `claude://claude.ai/new?q=`
-prefilled; it is prefill-only, refuses auto_send and never falls back to the
-claude CLI (paid Claude plan required; no API billing).
+`claude_app.py` auto-sends by default through the Claude Code CLI on the
+user's subscription login (`claude auth login`, paid plan, separate from the
+desktop app login) and returns `claude --resume <id>`; the desktop app has no
+documented link to open that session. `prefill` (opt-in) opens
+`claude://code/new?q=` or `claude://claude.ai/new?q=`. No API billing fallback.

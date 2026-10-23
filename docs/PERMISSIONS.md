@@ -65,6 +65,8 @@ web search only when `network=allow`; `read_files=deny` refuses. `ask` cannot be
 asked inside `codex exec`, so it maps to the narrower setting. Effects here are
 Codex-native, not brokered. `prefill` performs no effects until the user sends.
 
-`claude_app` inherits the same shared policy and performs no effects; it only
-prefills the Claude desktop composer. A `folder` always triggers Claude's own
+`claude_app` inherits the same shared policy. auto_send maps it to
+`--permission-mode plan`, or `acceptEdits` only when `write_files=allow`;
+`bypassPermissions`/`dontAsk` are never used and `read_files=deny` refuses.
+Effects are Claude-native, not brokered. prefill performs no effects. A `folder` always triggers Claude's own
 confirmation dialog. Only `claude://` URLs are handed to the OS.

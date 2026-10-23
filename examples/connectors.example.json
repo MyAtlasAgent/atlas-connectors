@@ -8,8 +8,9 @@
     },
     "claude_app": {
       "transport": "claude_app",
-      "mode": "prefill",
-      "surface": "code"
+      "mode": "auto_send",
+      "surface": "code",
+      "executable": "claude"
     },
     "claude": {
       "transport": "subscription_cli",

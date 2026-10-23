@@ -24,7 +24,8 @@ def initialize(directory, isolated=False):
     root.mkdir(parents=True, exist_ok=True)
     # New users default to the Codex desktop app on their ChatGPT login.
     providers = {DEFAULT_PROVIDER: {"transport": "codex_app", "mode": DEFAULT_MODE, "executable": "codex"},
-                 "claude_app": {"transport": "claude_app", "mode": "prefill", "surface": "code"}}
+                 "claude_app": {"transport": "claude_app", "mode": "auto_send", "surface": "code",
+                                "executable": "claude"}}
     for name, binary in BINARIES.items():
         route = {"transport": "subscription_cli", "executable": binary}
         if isolated:
@@ -52,9 +53,11 @@ def route_for(configuration, provider=DEFAULT_PROVIDER, *, mode=None, workspace=
     if route is None:
         raise AdapterError("Provider is not configured")
     if route.get("transport") == "claude_app":
-        return ClaudeAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", "prefill"),
+        return ClaudeAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", "auto_send"),
                               surface=surface or route.get("surface", "code"),
-                              folder=workspace or route.get("folder"), opener=opener)
+                              folder=workspace or route.get("folder"), opener=opener,
+                              executable=route.get("executable", "claude"),
+                              timeout=route.get("timeout", 300), runner=runner)
     if route.get("transport") != "codex_app":
         raise AdapterError("Selected route is not codex_app; use `run` for CLI providers; no substitution")
     return CodexAppRoute(configuration.permissions_for(provider), mode=mode or route.get("mode", DEFAULT_MODE),
@@ -103,7 +106,7 @@ def main(argv=None):
     send = commands.add_parser("send", help="default route: deliver a prompt to the Codex desktop app")
     send.add_argument("prompt")
     send.add_argument("--provider", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER, "claude_app"])
-    send.add_argument("--mode", choices=MODES, help="auto_send (default) or prefill (user presses Send)")
+    send.add_argument("--mode", choices=MODES, help="auto_send (default, sends via the official CLI) or prefill (explicit opt-in; user presses Send)")
     send.add_argument("--workspace", help="absolute existing directory (codex path / claude code folder)")
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")

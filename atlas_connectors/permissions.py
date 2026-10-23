@@ -127,8 +127,6 @@ def load_configuration(path):
         for app in ("codex_app", "claude_app"):
             if (name == app) != (route.get("transport") == app):
                 raise ConfigurationError(f"{name}: {app} transport is only valid for the {app} provider")
-        if name == "claude_app" and route.get("mode", "prefill") != "prefill":
-            raise ConfigurationError("claude_app is prefill-only; auto_send refused")
         if "mode" in route and route["mode"] not in ("auto_send", "prefill"):
             raise ConfigurationError(f"{name}: mode must be auto_send or prefill")
         cmd = route.get("cmd")

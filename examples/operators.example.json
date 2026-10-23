@@ -10,9 +10,10 @@
     },
     "claude_app": {
       "transport": "claude_app",
-      "mode": "prefill",
+      "mode": "auto_send",
       "surface": "code",
-      "cmd": null
+      "cmd": null,
+      "executable": "claude"
     },
     "claude": {
       "prompt_mode": "pointer",

@@ -134,7 +134,9 @@ class Route(unittest.TestCase):
         self.assertEqual(sum(1 for c in runner.calls if "exec" in c), 1)
 
     def test_unknown_version_and_api_login_refuse_before_send(self):
-        for runner in (FakeRunner(version="codex-cli 0.148.0"), FakeRunner(login="Logged in using an API key")):
+        self.assertEqual(self.route(FakeRunner(version="codex-cli 0.148.0")).deliver("hi")["status"], "sent")
+        self.opened.clear()
+        for runner in (FakeRunner(version="codex-cli 0.147.0"), FakeRunner(login="Logged in using an API key")):
             with self.assertRaises(AdapterError):
                 self.route(runner).deliver("hello")
             self.assertFalse(any("exec" in c for c in runner.calls))
@@ -158,6 +160,9 @@ class Route(unittest.TestCase):
 
 
 class DefaultSelection(unittest.TestCase):
+    def test_auto_send_is_default_and_prefill_is_opt_in(self):
+        self.assertEqual(CodexAppRoute(policy()).mode, "auto_send")
+
     def test_codex_app_is_default_in_examples_init_and_cli(self):
         self.assertEqual(PROVIDERS[0], DEFAULT_PROVIDER)
         example = load_configuration(ROOT / "examples/operators.example.json")

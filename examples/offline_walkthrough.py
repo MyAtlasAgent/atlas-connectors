@@ -75,14 +75,17 @@ def main():
                             workspace=temporary, opener=opened.append,
                             runner=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no launch")))
         link = app.preview("Say hello & name your model?")
-        print("codex_app (default route, mode=" + app.mode + ") prefill link preview (not opened): "
+        print("codex_app (default route, mode=" + app.mode + ") prefill opt-in link preview (not opened): "
               + link.replace(quote(str(Path(temporary).resolve()), safe=""), "<TEMP>"))
         print("codex_app auto_send would open after CLI send (not opened): "
               + thread_link("00000000-0000-0000-0000-000000000000"))
         from atlas_connectors.claude_app import ClaudeAppRoute
-        claude = ClaudeAppRoute(configuration.permissions_for("claude_app"), surface=routes["claude_app"]["surface"],
-                                opener=opened.append)
-        print("claude_app (prefill only, user presses Send) link preview (not opened): "
+        claude = ClaudeAppRoute(configuration.permissions_for("claude_app"), mode=routes["claude_app"]["mode"],
+                                surface=routes["claude_app"]["surface"], opener=opened.append)
+        from atlas_connectors.claude_app import permission_mode_for
+        print("claude_app (mode=" + claude.mode + ") would run (not executed): claude -p --session-id <uuid4> "
+              "--permission-mode " + permission_mode_for(claude.policy) + " --output-format json  (prompt on stdin)")
+        print("claude_app prefill opt-in link preview (not opened): "
               + claude.preview("Say hello & name your model?"))
         assert opened == []
 

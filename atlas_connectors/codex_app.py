@@ -5,7 +5,7 @@ Two delivery modes, both explicit and honest about what was observed:
 * ``auto_send`` (default): the official Codex CLI sends the prompt on the
   user's ChatGPT subscription in a fresh session, then the app is pointed at
   that session with ``codex://threads/<uuid>``. No keystrokes or UI automation.
-* ``prefill``: ``codex://threads/new?prompt=...`` opens a new desktop thread
+* ``prefill`` (explicit opt-in only): ``codex://threads/new?prompt=...`` opens a new desktop thread
   with the composer prefilled. The app never auto-submits; the user presses Send.
 
 Runner and opener are injectable so tests launch nothing. A failure never falls
@@ -35,6 +35,8 @@ MAX_LINK_BYTES = 8000  # conservative OS URL-handler limit (Windows ShellExecute
 MAX_PROMPT_BYTES = 200_000
 UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 PREFILLED = "prefilled_awaiting_user_send"
+# Route-specific qualification: 0.148.0 verified live (ChatGPT login, exec -s read-only).
+ACCEPTED_VERSIONS = frozenset(TESTED["codex"]) | {"0.148.0"}
 
 
 def _workspace(path):
@@ -167,7 +169,7 @@ class CodexAppRoute:
                     env[key] = os.environ[key]
             code, out, _ = self.runner([executable, "--version"], cwd=root, env=env, timeout=15)
             version = re.search(r"\b(\d+\.\d+\.\d+)\b", out or "")
-            if code or not version or version[1] not in TESTED["codex"]:
+            if code or not version or version[1] not in ACCEPTED_VERSIONS:
                 raise AdapterError("Codex client version is not qualified; nothing sent")
             code, out, err = self.runner([executable, "login", "status"], cwd=root, env=env, timeout=15)
             if code or "chatgpt" not in (out + err).lower():

@@ -43,23 +43,29 @@ read-only, never broader), reads the session id, then opens
 CLI-sent session appears in the app's thread list is verified only by that deep
 link opening it. If no session id is found the result is `sent_session_unknown`
 and nothing is opened. CLI failure opens nothing and never falls back.
-`prefill` opens `codex://threads/new?prompt=...` (optional `&path=`); the app never
+`prefill` (explicit opt-in) opens `codex://threads/new?prompt=...` (optional `&path=`); the app never
 auto-submits, so the result is `prefilled_awaiting_user_send`. Set
 `"mode": "prefill"` on the `codex_app` route to make that the default.
 
-### Claude desktop app (prefill only)
+### Claude (auto-send by default)
 
 ```sh
-atlas-connectors send 'Say hello' --provider claude_app                 # claude://code/new?q=
-atlas-connectors send 'Say hello' --provider claude_app --surface chat  # claude://claude.ai/new?q=
+claude auth login                                        # once, in the CLI, paid Claude plan
+atlas-connectors send 'Say hello' --provider claude_app  # sends now, returns reply + resume command
+atlas-connectors send 'Say hello' --provider claude_app --mode prefill [--surface chat]
 ```
 
-Claude Code and the Claude app require a paid Claude plan; there is no API
-billing fallback. Claude Desktop (1.1.2321+) links never auto-submit, so
-`claude_app` is prefill-only (`prefilled_awaiting_user_send`); `--mode auto_send`
-is refused rather than falling back to the claude CLI. Prompts over 14,000
-characters are refused instead of silently truncated. `--workspace` sets the
-code surface's absolute `folder`, which Claude confirms with an in-app dialog.
+Claude auto-send requires `claude auth login` with a paid Claude plan in the
+Claude Code CLI; that login is separate from the Claude desktop app login. API
+keys, Console billing and Bedrock/Vertex overrides are refused. It runs
+`claude -p --session-id <uuid4> --permission-mode <plan|acceptEdits>
+--output-format json` (prompt on stdin; `acceptEdits` only when
+`write_files=allow`) and returns `sent`, the reply, the session id and
+`claude --resume <id>`. The Claude desktop app has no documented deep link to
+open a CLI session, so nothing is opened and the session is not claimed to
+appear in the app. `prefill` is an explicit opt-in (`claude://code/new?q=` or
+`claude://claude.ai/new?q=`, prompts over 14,000 characters refused; the user
+presses Send). Neither app route uses keystroke or UI automation.
 
 ## Install and connect
 
