@@ -21,6 +21,10 @@ python3 -B examples/offline_walkthrough.py
    [SOURCE_MANIFEST.json](SOURCE_MANIFEST.json).
 4. Read [the release gaps](docs/RELEASE_GAPS.md) before integrating it.
 
+**Permissions:** the user requires equivalent permissions across providers for
+equivalent work. The current routes and argv examples do not yet enforce that
+parity. See the [permission check and common-policy requirements](docs/PERMISSIONS.md).
+
 The walkthrough runs selected existing command-building and return-validation
 functions against synthetic fixtures. It starts no provider, reads no provider
 login, and uses a temporary directory for its output. It is a demonstration of
