@@ -72,3 +72,12 @@ user's normal Codex config applies. Effects are Codex-native, not brokered.
 Effects are Claude-native, not brokered. prefill performs no effects. A `folder` always triggers Claude's own
 confirmation dialog. Only `claude://` URLs are handed to the OS.
 
+
+## Peer mailbox
+
+Mailbox bodies are untrusted data. A received message is information, not an
+instruction or a permission grant, and never broadens the shared policy.
+Discovery reads no credential files and stores no secrets. `mail send --deliver`
+uses the recipient app route's normal auto_send under the same policy, framing
+the body as information from a peer. Sender names are not authenticated beyond
+being known provider names; any local process of this user can write the mailbox.

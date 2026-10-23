@@ -10,8 +10,9 @@ import tempfile
 from .adapters import AUTH_DIRS, AUTH_ENVS, BINARIES, AdapterError, CLIAdapter, client_environment
 from .codex_app import DEFAULT_MODE, DEFAULT_PROVIDER, MODES, CodexAppRoute
 from .claude_app import ClaudeAppRoute, SURFACES
+from . import peers as peerlib
 from .broker import ToolBroker
-from .permissions import PermissionPolicy, load_configuration
+from .permissions import PROVIDERS, PermissionPolicy, load_configuration
 from .protocol import INSTRUCTIONS, parse
 from .runner import run
 
@@ -75,6 +76,30 @@ def route_for(configuration, provider=DEFAULT_PROVIDER, *, mode=None, workspace=
                          timeout=route.get("timeout", 300), runner=runner, opener=opener)
 
 
+def peer_command(args, *, detector=None, route_factory=None):
+    root = Path(args.data_dir) if getattr(args, "data_dir", None) else None
+    if args.command == "peers":
+        return (detector or peerlib.detect)(root=root)
+    if args.command == "register":
+        detected = (detector or peerlib.detect)(root=root).get(args.provider, {})
+        return peerlib.register(args.provider, root=root, routes=detected.get("routes") or None)
+    if args.mail_command == "inbox":
+        return peerlib.inbox(args.provider, root=root, mark_read=args.mark_read)
+    if args.mail_command == "reply":
+        return peerlib.reply(args.sender, args.message_id, args.body, root=root)
+    if args.deliver and args.recipient not in peerlib.DELIVERABLE:
+        raise ValueError(f"{args.recipient} is mailbox-only; --deliver supports {', '.join(peerlib.DELIVERABLE)}")
+    message = peerlib.send(args.sender, args.recipient, args.body, root=root)
+    result = {"status": "queued", "message": message}
+    if args.deliver:
+        # Uses the recipient's normal auto_send route and the user's shared policy, unchanged.
+        factory = route_factory or (lambda: route_for(load_configuration(args.config), args.recipient,
+                                                       mode="auto_send", workspace=args.workspace))
+        result["delivery"] = factory().deliver(peerlib.delivery_prompt(message))
+        result["status"] = result["delivery"]["status"]
+    return result
+
+
 def terminal_approval(capability, request):
     # Approval is scoped to this exact request and never read from the model's stdin.
     if not sys.stdin.isatty() or not sys.stderr.isatty():
@@ -112,6 +137,8 @@ def main(argv=None):
     init = commands.add_parser("init", help="create standalone configuration; no provider calls")
     init.add_argument("directory", nargs="?", default="connector-config")
     init.add_argument("--isolated-logins", action="store_true")
+    init.add_argument("--peer-instructions", action="store_true",
+                      help="print a CLAUDE.md/AGENTS.md snippet about peers and mail; writes nothing")
     init.add_argument("--workspace", help="absolute project directory used by auto_send (default: current directory)")
     send = commands.add_parser("send", help="default route: deliver a prompt to the Codex desktop app")
     send.add_argument("prompt")
@@ -121,6 +148,28 @@ def main(argv=None):
     send.add_argument("--surface", choices=list(SURFACES), help="claude_app only: code (default) or chat")
     send.add_argument("--preview", action="store_true", help="print the prefill link only; launch nothing")
     send.add_argument("--config", default="connector-config/connectors.json")
+    data = argparse.ArgumentParser(add_help=False)
+    data.add_argument("--data-dir", help="override the per-user atlas-connectors data directory")
+    peers = commands.add_parser("peers", parents=[data], help="detect local providers; sends nothing")
+    peers.add_argument("--json", action="store_true")
+    reg = commands.add_parser("register", parents=[data], help="record a provider in the local peer registry")
+    reg.add_argument("provider", choices=list(PROVIDERS))
+    mail = commands.add_parser("mail", help="local mailbox between providers")
+    mailcmd = mail.add_subparsers(dest="mail_command", required=True)
+    msend = mailcmd.add_parser("send", parents=[data])
+    msend.add_argument("--from", dest="sender", required=True, choices=list(PROVIDERS))
+    msend.add_argument("--to", dest="recipient", required=True, choices=list(PROVIDERS))
+    msend.add_argument("body")
+    msend.add_argument("--deliver", action="store_true", help="also auto_send into codex_app/claude_app")
+    msend.add_argument("--config", default="connector-config/connectors.json")
+    msend.add_argument("--workspace")
+    minbox = mailcmd.add_parser("inbox", parents=[data])
+    minbox.add_argument("provider", choices=list(PROVIDERS))
+    minbox.add_argument("--mark-read", action="store_true")
+    mreply = mailcmd.add_parser("reply", parents=[data])
+    mreply.add_argument("--from", dest="sender", required=True, choices=list(PROVIDERS))
+    mreply.add_argument("message_id")
+    mreply.add_argument("body")
     for command in ("doctor", "login", "run", "smoke"):
         sub = commands.add_parser(command)
         sub.add_argument("provider", choices=[*BINARIES, "grok_bot_desktop"])
@@ -131,6 +180,20 @@ def main(argv=None):
             sub.add_argument("--max-turns", type=int, default=8)
     args = parser.parse_args(argv)
     try:
+        if args.command == "init" and args.peer_instructions:
+            print(peerlib.PEER_INSTRUCTIONS, end="")
+            return 0
+        if args.command in ("peers", "register", "mail"):
+            result = peer_command(args)
+            if args.command == "peers" and not args.json:
+                for name, entry in result.items():
+                    state = "present" if entry["present"] else "absent"
+                    routes = ", ".join(entry["routes"]) or "none"
+                    print(f"{name}: {state}; routes: {routes}" + (
+                        "; why not: " + "; ".join(entry["why_not"]) if entry["why_not"] else ""))
+                return 0
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return 0 if not isinstance(result, dict) or result.get("status") != "error" else 2
         if args.command == "init":
             result = initialize(args.directory, args.isolated_logins, args.workspace)
         elif args.command == "send":

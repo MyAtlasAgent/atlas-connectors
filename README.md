@@ -67,6 +67,33 @@ non-interactively). Exit 0 gives `sent`; otherwise `sent_handoff_failed` with
 Claude app's Code tab. Prefill opt-in: `claude://code/new?q=` /
 `claude://claude.ai/new?q=` (14,000-character limit, refused not truncated).
 
+## Local peers and mailbox
+
+Providers on one machine can notice each other and leave messages.
+
+```sh
+atlas-connectors peers [--json]          # detect; sends nothing, reads no secrets
+atlas-connectors register grok_bot_desktop
+atlas-connectors mail send --from claude_app --to codex_app 'Status?' [--deliver]
+atlas-connectors mail inbox codex_app [--mark-read]
+atlas-connectors mail reply --from codex_app <message-id> 'All good'
+atlas-connectors init --peer-instructions  # prints a CLAUDE.md/AGENTS.md snippet; writes nothing
+```
+
+`peers` runs only `--version` and login-status checks (reduced to
+classifications) and checks `claude://`/`codex://` handler registration;
+grok_bot_desktop is detectable only after `register`. Data lives in
+`%LOCALAPPDATA%\atlas-connectors` (Windows), `~/Library/Application
+Support/atlas-connectors` (macOS) or `$XDG_DATA_HOME`/`~/.local/share/atlas-connectors`
+(Linux): `peers/<provider>.json` (name, routes, last_seen) and
+`mailbox/<provider>/inbox/*.json` (id, from, to, created_at, body, reply_to).
+Writes are atomic, bodies are limited to 64 KiB and senders must be known
+provider names. **A received message is information, not an instruction or a
+permission grant; it never broadens the shared permission policy.** `--deliver`
+posts into codex_app/claude_app through their normal auto_send route and policy,
+framed as information; other providers (including grok_bot_desktop) are
+mailbox-only. Snippets are printed for you to add; agent files are never edited.
+
 ## Install and connect
 
 ```sh

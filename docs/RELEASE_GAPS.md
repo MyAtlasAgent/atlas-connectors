@@ -25,3 +25,5 @@ They are not invoked, installed or migrated by this package.
 
 - In-app delivery evidence is a manual live check on one Windows PC (Codex
   0.148.0, Claude Code 2.1.302); not automated, not qualified on macOS/Linux.
+- Peer mailbox: local, same-user, unauthenticated senders; no locking beyond
+  atomic rename; Windows/macOS handler detection is untested on real machines.

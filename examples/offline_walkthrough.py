@@ -94,6 +94,15 @@ def main():
               + claude.preview("Say hello & name your model?"))
         assert opened == []
 
+        from atlas_connectors import peers
+        mailroot = worktree / "peer-data"
+        message = peers.send("claude_app", "grok_bot_desktop", "Status update — synthetic", root=mailroot)
+        received = peers.inbox("grok_bot_desktop", root=mailroot, mark_read=True)
+        assert [m["id"] for m in received] == [message["id"]] and received[0]["trust"].startswith("untrusted_data")
+        answer = peers.reply("grok_bot_desktop", message["id"], "Acknowledged", root=mailroot)
+        assert answer["to"] == "claude_app" and answer["reply_to"] == message["id"]
+        print("Peer mailbox: send -> inbox (untrusted data) -> reply round trip in a temp dir; nothing delivered")
+
         forbidden = {"prompt_mode": "pointer", "cmd": ["fixture", "--dangerously-skip-permissions"]}
         try:
             context["build_cmd"](forbidden, str(packet), temporary)
