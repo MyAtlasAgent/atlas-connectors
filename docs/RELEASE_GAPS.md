@@ -19,6 +19,9 @@ presenting it as a portable live connector library:
 - Revalidate supported provider CLI versions and permission behavior with each
   user's authorized account. No provider command or subscription probe was run
   while preparing this package. Never silently switch to billable API access.
+- Future live transports must enforce the provider-session model policy on
+  final commands without static model/tier requirements or paid fallback.
+  Observed model identity and reviewer qualification remain separate evidence.
 - Codex needs an independently portable endpoint beyond generic command assembly.
 - Shared user permission selection and configuration parity are implemented.
   Translate that policy into each live adapter and prove equivalent enforcement.

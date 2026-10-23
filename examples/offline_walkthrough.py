@@ -15,6 +15,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from atlas_connectors.permissions import CAPABILITIES, load_configuration
+from atlas_connectors.model_policy import ModelPinError, ensure_unpinned_command
 
 
 def no_external_execution(event, args):
@@ -47,7 +48,7 @@ def main():
             "OPS": temporary,
             "CFG": {"forbidden_flags": ["--dangerously-skip-permissions"]},
             # Demo substitutions: no real routing or durable receipt writer.
-            "apply_model_routing": lambda op, cmd, packet: cmd,
+            "apply_model_routing": lambda op, cmd, packet: list(ensure_unpinned_command(cmd)),
             "write_route_receipt": lambda *args: receipts.append("DEMO_MEMORY_ONLY"),
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "existing_build_cmd", "exec"), context)
@@ -55,9 +56,12 @@ def main():
         routes = configuration.providers
         for provider in routes:
             assert configuration.permissions_for(provider) is configuration.policy
+            selection = configuration.model_selection_for(provider)
+            assert selection.strategy == "provider_session"
+            assert selection.requested_model is None and selection.observed_model == "UNKNOWN"
             assert all(configuration.permissions_for(provider).preference(capability) == "ask"
                        for capability in CAPABILITIES)
-        print("All four providers inherit the same user-selected permissions (example: ask)")
+        print("All four providers inherit one permission policy and the model selected in the user provider session")
         for name in ("claude", "codex", "supergrok_cli"):
             command = context["build_cmd"](routes[name], str(packet), temporary, callsign="DEMO")
             assert command and "{prompt}" not in " ".join(command)
@@ -76,6 +80,13 @@ def main():
         else:
             raise AssertionError("Existing forbidden-flag check did not refuse")
         print("Negative control: forbidden command flag refused")
+        # Even a post-template routing step may not add a stale model pin.
+        try:
+            ensure_unpinned_command(["claude", "-p", "sample", "--model", "expired-free-model"])
+        except ModelPinError:
+            print("Negative control: post-routing model pin refused")
+        else:
+            raise AssertionError("Model pin unexpectedly allowed")
 
         # Inspected validator has no top-level execution except its __main__ guard.
         validator = runpy.run_path(str(ROOT / "reference/grok/grok-return-validate.py.txt"))

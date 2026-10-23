@@ -12,6 +12,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from atlas_connectors.model_policy import PROVIDER_SELECTED, ModelSelection, ensure_unpinned_command
+
 PROVIDERS = ("claude", "codex", "supergrok_cli", "grok_bot_desktop")
 CAPABILITIES = (
     "read_files", "write_files", "run_commands", "network", "git_commit",
@@ -94,6 +96,16 @@ class ConnectorConfiguration:
             raise ConfigurationError(f"Provider is not configured: {provider}")
         return self.policy
 
+    def model_selection_for(self, provider) -> ModelSelection:
+        """Connect with the user's provider-session model, not an Atlas pin.
+
+        This describes requested routing only. The actual served model is
+        UNKNOWN until a separately qualified transport observes it.
+        """
+        if provider not in self.providers:
+            raise ConfigurationError(f"Provider is not configured: {provider}")
+        return PROVIDER_SELECTED
+
 
 def load_configuration(path):
     """Read a transport configuration and its single adjacent user policy.
@@ -125,6 +137,7 @@ def load_configuration(path):
         if cmd is not None:
             if not isinstance(cmd, list) or not cmd or any(not isinstance(arg, str) for arg in cmd):
                 raise ConfigurationError(f"{name}: cmd must be a nonempty string array or null")
+            ensure_unpinned_command(cmd)
             for arg in cmd:
                 if any(arg == flag or arg.startswith(flag + "=")
                        or (len(flag) == 2 and arg.startswith(flag) and not arg.startswith("--"))

@@ -29,6 +29,11 @@ overrides are rejected by the configuration loader. See [setup and enforcement
 limits](docs/PERMISSIONS.md). Live provider enforcement is not implemented in
 this source preview.
 
+**Provider-native models, no fixed tiers:** choose an available model inside
+your signed-in provider client; no Atlas model ID or free-plan catalog is
+required for connection. See [model selection](docs/MODEL_SELECTION.md).
+This source preview cannot observe the actual model or grant reviewer authority.
+
 The walkthrough runs selected existing command-building and return-validation
 functions against synthetic fixtures. It starts no provider, reads no provider
 login, and uses a temporary directory for its output. It is a demonstration of

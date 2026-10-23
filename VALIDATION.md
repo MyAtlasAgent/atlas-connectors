@@ -32,3 +32,11 @@ No independent acceptance, live compatibility or production readiness is claimed
   historical reference hashes remain unchanged.
 - These checks validate configuration parity. No provider-enforcement or live
   permission change is claimed.
+
+## Provider-native model selection (source preview)
+
+- 18 unit tests passed; all four providers inherit provider_session.
+- Templates and post-routing argv refuse pinned model flags.
+- Free/paid model catalogs are not part of the connection configuration.
+- Actual served model remains UNKNOWN without verified runtime evidence.
+- No live transport, login, SDK install or paid model call was performed.

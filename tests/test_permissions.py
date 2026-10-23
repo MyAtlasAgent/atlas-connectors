@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from atlas_connectors.model_policy import ModelPinError, ensure_unpinned_command
 from atlas_connectors.permissions import (
     CAPABILITIES, PROVIDERS, ConfigurationError, PermissionPolicy, load_configuration,
 )
@@ -32,6 +33,58 @@ class SharedPermissions(unittest.TestCase):
         self.assertEqual(set(loaded.providers), set(PROVIDERS))
         for provider in PROVIDERS:
             self.assertIs(loaded.permissions_for(provider), loaded.policy)
+
+    def test_all_providers_use_the_model_the_user_selects_in_their_session(self):
+        loaded = self.load()
+        for provider in PROVIDERS:
+            with self.subTest(provider=provider):
+                route = loaded.model_selection_for(provider)
+                self.assertEqual(route.strategy, "provider_session")
+                self.assertIsNone(route.requested_model)
+                self.assertEqual(route.observed_model, "UNKNOWN")
+                self.assertEqual(route.observation_source, "UNKNOWN")
+                self.assertNotIn("model", loaded.providers[provider])
+                self.assertNotIn("model_id", loaded.providers[provider])
+
+    def test_a_model_pin_is_not_a_connection_requirement(self):
+        # Account models may disappear or be renamed without changing Atlas.
+        for provider in PROVIDERS:
+            for field in ("model", "model_id", "preferred_model", "fallback_model",
+                          "model_candidates", "required_model"):
+                with self.subTest(provider=provider, field=field):
+                    old = copy.deepcopy(self.config)
+                    self.config["providers"][provider][field] = "obsolete-model-id"
+                    with self.assertRaises(ConfigurationError):
+                        self.load()
+                    self.config = old
+
+    def test_model_selector_flags_are_refused_for_any_provider(self):
+        for provider in PROVIDERS:
+            for args in (["--model", "obsolete"], ["--model=obsolete"],
+                         ["--model-id", "obsolete"], ["--fallback-model=obsolete"],
+                         ["--preferred-model", "obsolete"], ["-m", "obsolete"],
+                         ["-m=obsolete"]):
+                with self.subTest(provider=provider, args=args):
+                    old = copy.deepcopy(self.config)
+                    self.config["providers"][provider]["cmd"] = ["provider-cli", *args]
+                    with self.assertRaises(ModelPinError):
+                        self.load()
+                    self.config = old
+
+    def test_post_routing_model_injection_is_refused(self):
+        # The existing extracted build_cmd calls apply_model_routing AFTER argv
+        # assembly. Future adapters must validate that final command too.
+        for command in (["claude", "-p", "prompt"],
+                        ["codex", "exec", "-o", "return.md", "prompt"],
+                        ["grok-mission", "packet", "out", "work"]):
+            with self.subTest(command=command[0]):
+                self.assertEqual(ensure_unpinned_command(command), tuple(command))
+                with self.assertRaises(ModelPinError):
+                    ensure_unpinned_command([*command, "--model=removed-from-free-tier"])
+
+    def test_bad_provider_cannot_claim_a_model_selection(self):
+        with self.assertRaises(ConfigurationError):
+            self.load().model_selection_for("not-configured")
 
     def test_unselected_actions_ask_equally(self):
         loaded = self.load()

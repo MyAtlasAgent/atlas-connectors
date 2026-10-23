@@ -60,6 +60,12 @@ route guard, permissions, return retrieval and checkout checks. The return
 validator binds candidate text to an observed SHA. Its source remains separate
 from the launcher snapshot; see the manifest and release gaps.
 
+## Provider-native model selection
+
+All four example routes use the authenticated provider session, not a pinned
+model. See [MODEL_SELECTION.md](MODEL_SELECTION.md); this is not served-model
+evidence or authoritative review qualification.
+
 ## Offline demonstration boundary
 
 The walkthrough selects only `build_cmd` from the reference text with Python AST.
